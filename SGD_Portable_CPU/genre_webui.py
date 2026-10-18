@@ -146,8 +146,6 @@ SUBSTYLE_OVERRIDE = {
     "Krautrock": "Rock",
     "Symphonic Rock": "Rock",
     "Blues Rock": "Rock",
-    "Folk Rock": "Rock",
-    "Country Rock": "Rock",
     "Southern Rock": "Rock",
     "Garage Rock": "Rock",
     "Surf": "Rock",
@@ -165,7 +163,6 @@ SUBSTYLE_OVERRIDE = {
     "Mod": "Rock",
     "Doo Wop": "Rock",
     "Twist": "Rock",
-    "Yé-Yé": "Rock",
     "Emo": "Rock",
     "Post-Hardcore": "Rock",
     "Post Rock": "Rock",
@@ -180,7 +177,6 @@ SUBSTYLE_OVERRIDE = {
     "Lounge": "Rock",
     "Acoustic": "Rock",
     "Oi": "Rock",
-    "Hardcore": "Rock",
     "Melodic Hardcore": "Rock",
     "Glam": "Rock",
     "Industrial Rock": "Rock",
@@ -229,7 +225,6 @@ SUBSTYLE_OVERRIDE = {
     "Big Beat": "Electronic",
     "Breakcore": "Electronic",
     "Gabber": "Electronic",
-    "Hardcore": "Electronic",
     "Happy Hardcore": "Electronic",
     "Speedcore": "Electronic",
     "Hardstyle": "Electronic",
@@ -243,7 +238,6 @@ SUBSTYLE_OVERRIDE = {
     "Euro-Disco": "Electronic",
     "Eurobeat": "Electronic",
     "Eurodance": "Electronic",
-    "Disco": "Electronic",
     "Nu-Disco": "Electronic",
     "Disco Polo": "Electronic",
     "Donk": "Electronic",
@@ -257,7 +251,6 @@ SUBSTYLE_OVERRIDE = {
     "Dubstep": "Electronic",
     "Grime": "Electronic",
     "2-Step": "Electronic",
-    "Dub": "Electronic",
     "Dub Techno": "Electronic",
     "Downtempo": "Electronic",
     "Trip Hop": "Electronic",
@@ -277,14 +270,10 @@ SUBSTYLE_OVERRIDE = {
     "Noise Electronic": "Electronic",
     "Berlin-School": "Electronic",
     "New Age": "Electronic",
-    "Modern Classical": "Electronic",
     "Dungeon Synth": "Electronic",
     "Neofolk Electronic": "Electronic",
     "Acid": "Electronic",
     "Acid House": "Electronic",
-    "Acid Jazz": "Electronic",
-    "Future Jazz": "Electronic",
-    "Jazzdance": "Electronic",
     "Beatdown": "Electronic",
     "Bleep": "Electronic",
     "Broken Beat": "Electronic",
@@ -358,9 +347,6 @@ SUBSTYLE_OVERRIDE = {
     "Ragtime": "Jazz",
     "Easy Listening": "Jazz",
     "Space-Age": "Jazz",
-    "Acid Jazz": "Jazz",
-    "Future Jazz": "Jazz",
-    "Jazzdance": "Jazz",
 
     # ===== BLUES  =====
     "Blues": "Blues",
@@ -397,7 +383,6 @@ SUBSTYLE_OVERRIDE = {
     "P.Funk": "Funk",
     "Free Funk": "Funk",
     "Boogie": "Funk",
-    "Disco": "Funk",
 
     # ===== COUNTRY  =====
     "Country": "Country",
@@ -405,7 +390,6 @@ SUBSTYLE_OVERRIDE = {
     "Honky Tonk": "Country",
     "Americana": "Country",
     "Nashville Sound": "Country",
-    "Country Rock": "Country",
     "Alternative Country": "Country",
     "Hillbilly": "Country",
     "Cajun": "Country",
@@ -417,7 +401,6 @@ SUBSTYLE_OVERRIDE = {
 
     # ===== FOLK / WORLD  =====
     "Folk": "Folk",
-    "Folk Rock": "Folk",
     "Singer-Songwriter": "Folk",
     "Celtic": "Folk",
     "Neofolk": "Folk",
@@ -447,7 +430,6 @@ SUBSTYLE_OVERRIDE = {
     "Reggae": "Reggae",
     "Ska": "Reggae",
     "Rocksteady": "Reggae",
-    "Dub": "Reggae",
     "Dancehall": "Reggae",
     "Roots Reggae": "Reggae",
     "Lovers Rock": "Reggae",
@@ -510,7 +492,6 @@ SUBSTYLE_OVERRIDE = {
     "Light Music": "Pop",
     "Music Hall": "Pop",
     "Kayōkyoku": "Pop",
-    "Yé-Yé": "Pop",
     "Bollywood": "Pop",
 
     # ===== CLASSICAL  =====
@@ -518,7 +499,6 @@ SUBSTYLE_OVERRIDE = {
     "Baroque": "Classical",
     "Romantic": "Classical",
     "Contemporary Classical": "Classical",
-    "Modern Classical": "Classical",
     "Neo-Classical": "Classical",
     "Neo-Romantic": "Classical",
     "Impressionist": "Classical",
@@ -567,11 +547,38 @@ SUBSTYLE_OVERRIDE = {
     "Brass & Military": "Misc",
 }
 
+# ---------------------------------------------------------------------------
+# Substyles Discogs files under more than one genre
+# ---------------------------------------------------------------------------
+# The model labels these with their parent, e.g. "Rock---Hardcore" and
+# "Electronic---Hardcore", so the parent decides the genre. A parent not
+# listed here falls back to DISCOGS_PREFIX_MAP.
+SHARED_SUBSTYLES = {
+    "Folk Rock":        {"Rock": "Rock", "Folk, World, & Country": "Folk"},
+    "Country Rock":     {"Rock": "Rock", "Folk, World, & Country": "Country"},
+    "Yé-Yé":            {"Rock": "Rock", "Pop": "Pop"},
+    "Hardcore":         {"Rock": "Rock", "Electronic": "Electronic"},
+    "Disco":            {"Electronic": "Electronic", "Funk / Soul": "Funk"},
+    "Dub":              {"Electronic": "Electronic", "Reggae": "Reggae"},
+    "Modern Classical": {"Electronic": "Electronic", "Classical": "Classical"},
+    "Acid Jazz":        {"Electronic": "Electronic", "Jazz": "Jazz"},
+    "Future Jazz":      {"Electronic": "Electronic", "Jazz": "Jazz"},
+    "Jazzdance":        {"Electronic": "Electronic", "Jazz": "Jazz"},
+}
+
+# Substyles missing from SUBSTYLE_OVERRIDE, reported once each on the console
+_unmapped_seen = set()
+
 def style_to_upper(label):
     if "---" in label:
         prefix, substyle = label.split("---", 1)
+        if substyle in SHARED_SUBSTYLES:
+            return SHARED_SUBSTYLES[substyle].get(prefix, DISCOGS_PREFIX_MAP.get(prefix))
         if substyle in SUBSTYLE_OVERRIDE:
             return SUBSTYLE_OVERRIDE[substyle]
+        if prefix in DISCOGS_PREFIX_MAP and label not in _unmapped_seen:
+            _unmapped_seen.add(label)
+            print(f"Unmapped substyle, using parent genre: {label}")
         return DISCOGS_PREFIX_MAP.get(prefix)
     if label in SUBSTYLE_OVERRIDE:
         return SUBSTYLE_OVERRIDE[label]
@@ -632,6 +639,7 @@ def load_model():
     print("MAEST ready.")
 
 SR = 16000
+MAX_SEGMENTS = 10
 
 # This version uses just the CPU
 DEVICE_LABEL = "CPU"
@@ -651,10 +659,13 @@ def classify_genre(audio_path):
         y = np.pad(y, (0, min_len - len(y)))
     seg_len = SR * 10
     total   = len(y)
-    n_segs  = min(5, total // seg_len)
-    if n_segs < 1:
-        n_segs = 1
-    starts = np.linspace(0, total - seg_len, n_segs, dtype=int)
+    # Skip the first and last 5% (intros, fade-outs, silence) when the
+    # track is long enough, then take up to 10 clips spread evenly.
+    edge  = int(total * 0.05)
+    first = edge if total - 2 * edge >= seg_len else 0
+    last  = (total - edge if total - 2 * edge >= seg_len else total) - seg_len
+    n_segs = max(1, min(MAX_SEGMENTS, (last - first) // seg_len + 1))
+    starts = np.linspace(first, last, n_segs, dtype=int)
     all_scores = {}
     for s in starts:
         segment = y[s:s + seg_len]
@@ -671,7 +682,7 @@ def classify_genre(audio_path):
     style_scores = aggregated
 
     upper_scores = {}
-    for style, score in style_scores.items():
+    for style, score in style_scores_raw.items():
         upper = style_to_upper(style)
         if upper:
             upper_scores[upper] = upper_scores.get(upper, 0) + score
