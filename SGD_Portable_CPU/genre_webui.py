@@ -32,6 +32,7 @@ sys.stderr = _SuppressHF(sys.stderr)
 sys.stdout = _SuppressHF(sys.stdout)
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "0"
 import tagcloud
+import track_facts
 
 import pandas as pd  # must import early to avoid circular import with plotly
 import logging
@@ -647,16 +648,22 @@ MAX_SEGMENTS = 10
 # This version uses just the CPU
 DEVICE_LABEL = "CPU"
 
-def classify_genre(audio_path):
-    load_model()
+def load_audio(audio_path):
+    """Mono signal at SR."""
     try:
-        y, sr = librosa.load(audio_path, sr=SR, mono=True)
+        y, _ = librosa.load(audio_path, sr=SR, mono=True)
     except Exception:
         # Fallback: use pydub for MP3 decoding
         from pydub import AudioSegment
         audio = AudioSegment.from_file(audio_path).set_channels(1).set_frame_rate(SR)
         y = np.array(audio.get_array_of_samples(), dtype=np.float32) / 32768.0
-        sr = SR
+    return y
+
+def classify_genre(audio_path, y=None, return_raw=False):
+    """Top styles and main genres. With return_raw, also every label's score."""
+    load_model()
+    if y is None:
+        y = load_audio(audio_path)
     min_len = SR * SEG_SECONDS
     if len(y) < min_len:
         y = np.pad(y, (0, min_len - len(y)))
@@ -694,10 +701,11 @@ def classify_genre(audio_path):
         upper = style_to_upper(style)
         if upper:
             upper_scores[upper] = max(upper_scores.get(upper, 0), score)
-    return (
+    result = (
         dict(sorted(style_scores.items(), key=lambda x: -x[1])[:50]),
         dict(sorted(upper_scores.items(), key=lambda x: -x[1]))
     )
+    return result + (style_scores_raw,) if return_raw else result
 
 # ---------------------------------------------------------------------------
 # Chart colors
@@ -882,11 +890,15 @@ from datetime import datetime
 
 BATCH_EXTS = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aiff", ".aif"}
 CATALOGUE_NAME = "sgd_catalogue.csv"
+# Every label's score per track, one JSON object per line, for grouping and
+# album building later
+FINGERPRINT_NAME = "sgd_fingerprints.jsonl"
 CATALOGUE_COLUMNS = (
-    ["file", "folder"]
+    ["file", "folder", "idea", "lane", "artist"]
     + [c for i in range(1, 4) for c in (f"genre_{i}", f"genre_{i}_pct")]
     + [c for i in range(1, 6) for c in (f"subgenre_{i}", f"subgenre_{i}_pct")]
-    + ["tags", "status", "error", "analysed_at"]
+    + ["bpm", "key", "camelot", "length", "loudness_db", "energy", "ending"]
+    + ["tags", "status", "error", "model", "analysed_at"]
 )
 BATCH_LOG_LINES = 500
 
@@ -952,6 +964,14 @@ def read_catalogue(csv_path):
                 rows[catalogue_key(row.get("folder"), row["file"])] = row
     return rows
 
+def read_header(csv_path):
+    """Column names of an existing catalogue, or None."""
+    try:
+        with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
+            return next(csv.reader(f), None)
+    except OSError:
+        return None
+
 def flush_pending(csv_path):
     """Append all pending rows to the CSV. Returns True when nothing is left waiting."""
     rows = batch_pending.get(csv_path)
@@ -993,13 +1013,26 @@ def rewrite_catalogue(csv_path, rows):
             pass
         return False
 
+def save_fingerprint(root, row, raw_scores):
+    try:
+        with open(os.path.join(root, FINGERPRINT_NAME), "a", encoding="utf-8") as f:
+            f.write(json.dumps({"file": row["file"], "folder": row["folder"], "model": MODEL_ID,
+                                "scores": {k: round(v, 4) for k, v in raw_scores.items()}},
+                               ensure_ascii=False) + "\n")
+    except OSError as e:
+        print(f"Could not save fingerprint for {row['file']}: {e}")
+
 def analyse_track(path, root):
     rel_folder = os.path.relpath(os.path.dirname(path), root)
     row = {c: "" for c in CATALOGUE_COLUMNS}
     row["file"]   = os.path.basename(path)
     row["folder"] = rel_folder
+    row["model"]  = MODEL_ID
     try:
-        style_scores, upper_scores = classify_genre(path)
+        y = load_audio(path)
+        style_scores, upper_scores, raw_scores = classify_genre(path, y=y, return_raw=True)
+        row.update(track_facts.track_facts(y, SR, path))
+        row["lane"], row["artist"] = track_facts.pick_lane(style_scores, row["bpm"] or None)
         best_upper = max(upper_scores.items(), key=lambda x: x[1]) if upper_scores else ("Unknown", 0)
         top_subs   = [k.split("---")[-1] for k in list(style_scores.keys())[:5]]
         tags       = get_tags(best_upper[0], top_subs, style_scores)
@@ -1009,6 +1042,7 @@ def analyse_track(path, root):
             row[f"subgenre_{i}"], row[f"subgenre_{i}_pct"] = g.split("---")[-1], round(s * 100, 1)
         row["tags"]   = ", ".join(tags)
         row["status"] = "ok"
+        save_fingerprint(root, row, raw_scores)
     except Exception as e:
         print(f"ERROR processing {path}: {e}")
         row["status"] = "failed"
@@ -1034,6 +1068,22 @@ def run_batch(folder, include_sub, retry_failed):
         batch_stop.clear()
         folder   = os.path.abspath(folder)
         csv_path = os.path.join(folder, CATALOGUE_NAME)
+
+        old_header = read_header(csv_path)
+        if old_header and old_header != CATALOGUE_COLUMNS and not batch_pending.get(csv_path):
+            stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
+            try:
+                for name in (CATALOGUE_NAME, FINGERPRINT_NAME):
+                    src = os.path.join(folder, name)
+                    if os.path.exists(src):
+                        base, ext = os.path.splitext(name)
+                        os.replace(src, os.path.join(folder, f"{base}_old_{stamp}{ext}"))
+                yield say(f"{CATALOGUE_NAME} came from an older SGD version. Renamed it to "
+                          f"sgd_catalogue_old_{stamp}.csv and starting a fresh catalogue.")
+            except OSError as e:
+                yield say(f"{CATALOGUE_NAME} came from an older SGD version but cannot be renamed: {e}. "
+                          "Close it in Excel and press Start again.")
+                return
 
         if batch_pending.get(csv_path) and flush_pending(csv_path):
             yield say("Saved rows left over from the last run.")
@@ -1074,7 +1124,8 @@ def run_batch(folder, include_sub, retry_failed):
             if row["status"] == "ok":
                 ok += 1
                 result = (f'{row["genre_1"] or "Unknown"} {row["genre_1_pct"] or 0:.0f}% · '
-                          f'{row["subgenre_1"] or "Unknown"} {row["subgenre_1_pct"] or 0:.0f}%')
+                          f'{row["subgenre_1"] or "Unknown"} {row["subgenre_1_pct"] or 0:.0f}% · '
+                          f'{row["bpm"]} BPM {row["camelot"]} · {row["lane"]}')
             else:
                 failed_n += 1
                 result = f'FAILED: {row["error"][:120]}'

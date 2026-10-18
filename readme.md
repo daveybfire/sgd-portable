@@ -101,7 +101,21 @@ Analyse a whole folder and build a catalogue you can open in Excel.
 
 Supported files: WAV, MP3, FLAC, OGG, M4A, AIFF.
 
-Results go into `sgd_catalogue.csv` in the chosen folder. Each track gets a row as soon as it is done: file, folder, top 3 genres with %, top 5 subgenres with %, tags, status, error and time of analysis.
+Results go into `sgd_catalogue.csv` in the chosen folder. Each track gets a row as soon as it is done:
+
+- **file, folder** and **idea**: the name without take numbers and tags, so `ACID CELLULOID [E] 001` and `004` share the idea `ACID CELLULOID`
+- **lane** and **artist**: which of your lanes the track fits, from `lanes.csv` (see below)
+- top 3 **genres** and top 5 **subgenres** with %. Each style is scored on its own, so a genre's % is its strongest style and the numbers do not add up to 100
+- **bpm**, **key**, **camelot** (the key on the Camelot wheel used for harmonic mixing), **length**, **loudness_db** and **energy** (1-10)
+- **ending**: clean, fade, cut off or long silence. A rough check to spot tracks that stop dead
+- tags, status, error, model and time of analysis
+
+Every track's full set of style scores also goes into `sgd_fingerprints.jsonl` in the same folder, for grouping and album building later.
+
+### Lanes
+`lanes.csv` next to `genre_webui.py` sets out up to five lanes, one per artist name. Each row lists styles separated by `;` and an optional BPM range. A track goes to the lane with the strongest matching style, or `Unsorted`. Put your artist names in the `artist_name` column. Edits apply from the next track.
+
+> 💡 A catalogue made by an older SGD version is renamed to `sgd_catalogue_old_<date>.csv` and the folder is analysed again from scratch.
 
 > 💡 Press Start again on the same folder to carry on. Tracks already in the CSV are skipped. Tick **Retry tracks that failed before** to have another go at the failed ones.
 
