@@ -95,6 +95,8 @@ SUBSTYLE_OVERRIDE = {
     # ===== METAL =====
     "Metal": "Metal",
     "Heavy Metal": "Metal",
+    "Groove Metal": "Metal",
+    "Industrial Metal": "Metal",
     "Death Metal": "Metal",
     "Black Metal": "Metal",
     "Atmospheric Black Metal": "Metal",
@@ -130,7 +132,6 @@ SUBSTYLE_OVERRIDE = {
     "Punk": "Rock",
     "Pop Punk": "Rock",
     "Post-Punk": "Rock",
-    "New Wave": "Rock",
     "Goth Rock": "Rock",
     "Deathrock": "Rock",
     "Coldwave": "Rock",
@@ -169,10 +170,8 @@ SUBSTYLE_OVERRIDE = {
     "Post-Metal": "Rock",
     "Math Rock": "Rock",
     "No Wave": "Rock",
-    "Noise": "Rock",
     "Noise Rock": "Rock",
     "Avantgarde": "Rock",
-    "Experimental": "Rock",
     "Lo-Fi": "Rock",
     "Lounge": "Rock",
     "Acoustic": "Rock",
@@ -180,7 +179,6 @@ SUBSTYLE_OVERRIDE = {
     "Melodic Hardcore": "Rock",
     "Glam": "Rock",
     "Industrial Rock": "Rock",
-    "Industrial": "Rock",  # double with Electronic, but here as Rock
     "Funk Metal": "Rock",
     "Rap Metal": "Rock",
 
@@ -244,16 +242,13 @@ SUBSTYLE_OVERRIDE = {
     "Hands Up": "Electronic",
     "Hi NRG": "Electronic",
     "Freestyle": "Electronic",
-    "Electro": "Electronic",
     "Electroclash": "Electronic",
     "Dance-pop": "Electronic",
     "Bassline": "Electronic",
     "Dubstep": "Electronic",
-    "Grime": "Electronic",
     "2-Step": "Electronic",
     "Dub Techno": "Electronic",
     "Downtempo": "Electronic",
-    "Trip Hop": "Electronic",
     "Illbient": "Electronic",
     "Chillwave": "Electronic",
     "Vaporwave": "Electronic",
@@ -364,7 +359,6 @@ SUBSTYLE_OVERRIDE = {
 
     # ===== R&B / SOUL / FUNK  =====
     "R&B": "R&B",
-    "Rhythm & Blues": "R&B",
     "Contemporary R&B": "R&B",
     "Neo Soul": "R&B",
     "RnB/Swing": "R&B",
@@ -388,6 +382,7 @@ SUBSTYLE_OVERRIDE = {
     "Country": "Country",
     "Bluegrass": "Country",
     "Honky Tonk": "Country",
+    "Western Swing": "Country",
     "Americana": "Country",
     "Nashville Sound": "Country",
     "Alternative Country": "Country",
@@ -428,7 +423,6 @@ SUBSTYLE_OVERRIDE = {
 
     # ===== REGGAE  =====
     "Reggae": "Reggae",
-    "Ska": "Reggae",
     "Rocksteady": "Reggae",
     "Dancehall": "Reggae",
     "Roots Reggae": "Reggae",
@@ -552,7 +546,8 @@ SUBSTYLE_OVERRIDE = {
 # ---------------------------------------------------------------------------
 # The model labels these with their parent, e.g. "Rock---Hardcore" and
 # "Electronic---Hardcore", so the parent decides the genre. A parent not
-# listed here falls back to DISCOGS_PREFIX_MAP.
+# listed here falls back to DISCOGS_PREFIX_MAP, as does any substyle
+# missing from SUBSTYLE_OVERRIDE.
 SHARED_SUBSTYLES = {
     "Folk Rock":        {"Rock": "Rock", "Folk, World, & Country": "Folk"},
     "Country Rock":     {"Rock": "Rock", "Folk, World, & Country": "Country"},
@@ -564,10 +559,16 @@ SHARED_SUBSTYLES = {
     "Acid Jazz":        {"Electronic": "Electronic", "Jazz": "Jazz"},
     "Future Jazz":      {"Electronic": "Electronic", "Jazz": "Jazz"},
     "Jazzdance":        {"Electronic": "Electronic", "Jazz": "Jazz"},
+    "Industrial":       {"Electronic": "Electronic", "Rock": "Rock"},
+    "Experimental":     {"Electronic": "Electronic", "Rock": "Rock"},
+    "New Wave":         {"Electronic": "Electronic", "Rock": "Rock"},
+    "Noise":            {"Electronic": "Electronic", "Rock": "Rock"},
+    "Electro":          {"Electronic": "Electronic", "Hip Hop": "Hip-Hop"},
+    "Grime":            {"Electronic": "Electronic", "Hip Hop": "Hip-Hop"},
+    "Trip Hop":         {"Electronic": "Electronic", "Hip Hop": "Hip-Hop"},
+    "Ska":              {"Reggae": "Reggae", "Rock": "Rock"},
+    "Rhythm & Blues":   {"Blues": "Blues", "Funk / Soul": "R&B"},
 }
-
-# Substyles missing from SUBSTYLE_OVERRIDE, reported once each on the console
-_unmapped_seen = set()
 
 def style_to_upper(label):
     if "---" in label:
@@ -576,9 +577,6 @@ def style_to_upper(label):
             return SHARED_SUBSTYLES[substyle].get(prefix, DISCOGS_PREFIX_MAP.get(prefix))
         if substyle in SUBSTYLE_OVERRIDE:
             return SUBSTYLE_OVERRIDE[substyle]
-        if prefix in DISCOGS_PREFIX_MAP and label not in _unmapped_seen:
-            _unmapped_seen.add(label)
-            print(f"Unmapped substyle, using parent genre: {label}")
         return DISCOGS_PREFIX_MAP.get(prefix)
     if label in SUBSTYLE_OVERRIDE:
         return SUBSTYLE_OVERRIDE[label]
@@ -621,6 +619,11 @@ def get_tags(main_genre, top_substyles, style_scores=None):
 # ---------------------------------------------------------------------------
 pipe = None
 
+# 30-second MAEST trained on 519 Discogs styles. It hears 30 s per clip,
+# so SEG_SECONDS must match.
+MODEL_ID    = "mtg-upf/discogs-maest-30s-pw-129e-519l"
+SEG_SECONDS = 30
+
 def load_model():
     global pipe
     if pipe is not None:
@@ -632,9 +635,9 @@ def load_model():
 
     pipe = hf_pipeline(
         "audio-classification",
-        model="mtg-upf/discogs-maest-10s-fs-129e",
+        model=MODEL_ID,
         trust_remote_code=True,
-        top_k=400,
+        top_k=None,  # every label
     )
     print("MAEST ready.")
 
@@ -654,13 +657,13 @@ def classify_genre(audio_path):
         audio = AudioSegment.from_file(audio_path).set_channels(1).set_frame_rate(SR)
         y = np.array(audio.get_array_of_samples(), dtype=np.float32) / 32768.0
         sr = SR
-    min_len = SR * 10
+    min_len = SR * SEG_SECONDS
     if len(y) < min_len:
         y = np.pad(y, (0, min_len - len(y)))
-    seg_len = SR * 10
+    seg_len = SR * SEG_SECONDS
     total   = len(y)
     # Skip the first and last 5% (intros, fade-outs, silence) when the
-    # track is long enough, then take up to 10 clips spread evenly.
+    # track is long enough, then take up to MAX_SEGMENTS clips spread evenly.
     edge  = int(total * 0.05)
     first = edge if total - 2 * edge >= seg_len else 0
     last  = (total - edge if total - 2 * edge >= seg_len else total) - seg_len
@@ -669,26 +672,28 @@ def classify_genre(audio_path):
     all_scores = {}
     for s in starts:
         segment = y[s:s + seg_len]
-        results = pipe(segment, sampling_rate=SR)
+        # MAEST was trained multi-label, so score each style on its own
+        # (0-100% each) rather than sharing 100% across all of them.
+        results = pipe(segment, sampling_rate=SR, function_to_apply="sigmoid")
         for r in results:
             all_scores[r['label']] = all_scores.get(r['label'], 0) + r['score']
     style_scores_raw = {k: v / n_segs for k, v in all_scores.items()}
 
-    # Group same genres together. Ska is for exmample under rock and reggae.
+    # Group same substyles together. Ska is for example under rock and reggae.
+    # Each style is scored on its own, so keep the stronger of the two.
     aggregated = {}
     for style, score in style_scores_raw.items():
         clean = style.split("---")[-1] if "---" in style else style
-        aggregated[clean] = aggregated.get(clean, 0) + score
+        aggregated[clean] = max(aggregated.get(clean, 0), score)
     style_scores = aggregated
 
+    # A genre scores as high as its strongest style. Summing would favour
+    # genres with many styles, like Electronic.
     upper_scores = {}
     for style, score in style_scores_raw.items():
         upper = style_to_upper(style)
         if upper:
-            upper_scores[upper] = upper_scores.get(upper, 0) + score
-    total_upper = sum(upper_scores.values())
-    if total_upper > 0:
-        upper_scores = {k: v / total_upper for k, v in upper_scores.items()}
+            upper_scores[upper] = max(upper_scores.get(upper, 0), score)
     return (
         dict(sorted(style_scores.items(), key=lambda x: -x[1])[:50]),
         dict(sorted(upper_scores.items(), key=lambda x: -x[1]))
