@@ -649,7 +649,7 @@ def load_model():
 
 
 SR = 16000
-MAX_SEGMENTS = 10
+MAX_SEGMENTS = 16
 
 # Detect device for display
 def get_device_label():
@@ -691,7 +691,9 @@ def classify_genre(audio_path, y=None, return_raw=False):
     edge  = int(total * 0.05)
     first = edge if total - 2 * edge >= seg_len else 0
     last  = (total - edge if total - 2 * edge >= seg_len else total) - seg_len
-    n_segs = max(1, min(MAX_SEGMENTS, (last - first) // seg_len + 1))
+    # Clips overlap by half, so no part of the song falls between two clips
+    hop    = seg_len // 2
+    n_segs = max(1, min(MAX_SEGMENTS, (last - first) // hop + 1))
     starts = np.linspace(first, last, n_segs, dtype=int)
     all_scores = {}
     for s in starts:
