@@ -91,6 +91,22 @@ Full details in `THIRD_PARTY_LICENSES.md`.
 
 > ⚠️ Results are probabilistic — AI makes mistakes. Always verify.
 
+## 📂 Batch
+Analyse a whole folder and build a catalogue you can open in Excel.
+
+- Under the charts, enter a folder or click **📁 Browse**
+- Tick **Include subfolders** to go through every folder below it
+- Click **▶ Start**. Tracks run one after another and the progress log shows each result
+- Click **■ Stop** to halt after the current track
+
+Supported files: WAV, MP3, FLAC, OGG, M4A, AIFF.
+
+Results go into `sgd_catalogue.csv` in the chosen folder. Each track gets a row as soon as it is done: file, folder, top 3 genres with %, top 5 subgenres with %, tags, status, error and time of analysis.
+
+> 💡 Press Start again on the same folder to carry on. Tracks already in the CSV are skipped. Tick **Retry tracks that failed before** to have another go at the failed ones.
+
+> 💡 You can open the CSV in Excel while a batch runs. Excel locks the file, so SGD holds new rows in memory and saves them once you close it.
+
 ## 🎯 Uninstall
 - Simply delete the folder. It is a virtual environment (Venv), and contains everything needed in its own folder.
 

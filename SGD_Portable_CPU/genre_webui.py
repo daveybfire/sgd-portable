@@ -856,6 +856,242 @@ def on_clear(dark_mode, show_tags):
     )
 
 # ---------------------------------------------------------------------------
+# Batch folder mode
+# ---------------------------------------------------------------------------
+import csv
+import threading
+import time
+import subprocess
+from datetime import datetime
+
+BATCH_EXTS = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aiff", ".aif"}
+CATALOGUE_NAME = "sgd_catalogue.csv"
+CATALOGUE_COLUMNS = (
+    ["file", "folder"]
+    + [c for i in range(1, 4) for c in (f"genre_{i}", f"genre_{i}_pct")]
+    + [c for i in range(1, 6) for c in (f"subgenre_{i}", f"subgenre_{i}_pct")]
+    + ["tags", "status", "error", "analysed_at"]
+)
+BATCH_LOG_LINES = 500
+
+batch_stop  = threading.Event()
+batch_lock  = threading.Lock()
+# Rows that could not be written yet (CSV locked by Excel), keyed by CSV path.
+# They survive a Stop and get saved on the next Start for the same folder.
+batch_pending = {}
+
+def browse_folder(current):
+    """Open the Windows folder picker via PowerShell. Returns the chosen path."""
+    if os.name != "nt":
+        return current
+    script = (
+        "Add-Type -AssemblyName System.Windows.Forms;"
+        "$f = New-Object System.Windows.Forms.Form -Property @{TopMost=$true};"
+        "$d = New-Object System.Windows.Forms.FolderBrowserDialog;"
+        "$d.Description = 'Choose a music folder for SGD batch analysis';"
+        "$d.ShowNewFolderButton = $false;"
+        "if ($env:SGD_START -and (Test-Path -LiteralPath $env:SGD_START)) { $d.SelectedPath = $env:SGD_START };"
+        "if ($d.ShowDialog($f) -eq [System.Windows.Forms.DialogResult]::OK) {"
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Write-Output $d.SelectedPath }"
+    )
+    env = dict(os.environ, SGD_START=(current or "").strip().strip('"'))
+    try:
+        res = subprocess.run(
+            ["powershell", "-NoProfile", "-STA", "-Command", script],
+            capture_output=True, env=env, timeout=600,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        chosen = res.stdout.decode("utf-8", errors="replace").strip()
+        return chosen or current
+    except Exception as e:
+        print(f"Folder picker failed: {e}")
+        return current
+
+def list_audio_files(folder, include_sub):
+    found = []
+    if include_sub:
+        for root, dirs, files in os.walk(folder):
+            dirs.sort(key=str.lower)
+            for f in sorted(files, key=str.lower):
+                if os.path.splitext(f)[1].lower() in BATCH_EXTS:
+                    found.append(os.path.join(root, f))
+    else:
+        for f in sorted(os.listdir(folder), key=str.lower):
+            p = os.path.join(folder, f)
+            if os.path.isfile(p) and os.path.splitext(f)[1].lower() in BATCH_EXTS:
+                found.append(p)
+    return found
+
+def catalogue_key(folder, file):
+    return os.path.normcase(os.path.normpath(os.path.join(folder or ".", file)))
+
+def read_catalogue(csv_path):
+    """Return {key: row} for rows already in the CSV. The last row for a track wins."""
+    rows = {}
+    if not os.path.exists(csv_path):
+        return rows
+    with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
+        for row in csv.DictReader(f):
+            if row.get("file"):
+                rows[catalogue_key(row.get("folder"), row["file"])] = row
+    return rows
+
+def flush_pending(csv_path):
+    """Append all pending rows to the CSV. Returns True when nothing is left waiting."""
+    rows = batch_pending.get(csv_path)
+    if not rows:
+        return True
+    try:
+        new_file = not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0
+        with open(csv_path, "a", encoding="utf-8", newline="") as f:
+            if new_file:
+                f.write("﻿")
+            w = csv.DictWriter(f, fieldnames=CATALOGUE_COLUMNS, extrasaction="ignore")
+            if new_file:
+                w.writeheader()
+            w.writerows(rows)
+            f.flush()
+            os.fsync(f.fileno())
+    except OSError:
+        return False
+    batch_pending.pop(csv_path, None)
+    return True
+
+def rewrite_catalogue(csv_path, rows):
+    """Replace the CSV with the given rows. Used to drop old failed rows before a retry."""
+    tmp = csv_path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="") as f:
+            f.write("﻿")
+            w = csv.DictWriter(f, fieldnames=CATALOGUE_COLUMNS, extrasaction="ignore")
+            w.writeheader()
+            w.writerows(rows)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, csv_path)
+        return True
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return False
+
+def analyse_track(path, root):
+    rel_folder = os.path.relpath(os.path.dirname(path), root)
+    row = {c: "" for c in CATALOGUE_COLUMNS}
+    row["file"]   = os.path.basename(path)
+    row["folder"] = rel_folder
+    try:
+        style_scores, upper_scores = classify_genre(path)
+        best_upper = max(upper_scores.items(), key=lambda x: x[1]) if upper_scores else ("Unknown", 0)
+        top_subs   = [k.split("---")[-1] for k in list(style_scores.keys())[:5]]
+        tags       = get_tags(best_upper[0], top_subs, style_scores)
+        for i, (g, s) in enumerate(list(upper_scores.items())[:3], 1):
+            row[f"genre_{i}"], row[f"genre_{i}_pct"] = g, round(s * 100, 1)
+        for i, (g, s) in enumerate(list(style_scores.items())[:5], 1):
+            row[f"subgenre_{i}"], row[f"subgenre_{i}_pct"] = g.split("---")[-1], round(s * 100, 1)
+        row["tags"]   = ", ".join(tags)
+        row["status"] = "ok"
+    except Exception as e:
+        print(f"ERROR processing {path}: {e}")
+        row["status"] = "failed"
+        row["error"]  = str(e)[:300].replace("\n", " ")
+    row["analysed_at"] = datetime.now().isoformat(timespec="seconds")
+    return row
+
+def run_batch(folder, include_sub, retry_failed):
+    log = []
+    def say(msg):
+        log.append(msg)
+        del log[:-BATCH_LOG_LINES]
+        return "\n".join(log)
+
+    folder = (folder or "").strip().strip('"')
+    if not folder or not os.path.isdir(folder):
+        yield say("Folder not found. Enter a folder path or use Browse.")
+        return
+    if not batch_lock.acquire(blocking=False):
+        yield say("A batch is already running. Press Stop first.")
+        return
+    try:
+        batch_stop.clear()
+        folder   = os.path.abspath(folder)
+        csv_path = os.path.join(folder, CATALOGUE_NAME)
+
+        if batch_pending.get(csv_path) and flush_pending(csv_path):
+            yield say("Saved rows left over from the last run.")
+
+        try:
+            done = read_catalogue(csv_path)
+        except OSError as e:
+            yield say(f"Cannot read {CATALOGUE_NAME}: {e}. Close it in Excel and press Start again.")
+            return
+        for row in batch_pending.get(csv_path, []):
+            done[catalogue_key(row["folder"], row["file"])] = row
+
+        if retry_failed:
+            failed = [k for k, r in done.items() if r.get("status") != "ok"]
+            if failed:
+                for k in failed:
+                    del done[k]
+                if os.path.exists(csv_path) and not batch_pending.get(csv_path):
+                    if rewrite_catalogue(csv_path, list(done.values())):
+                        yield say(f"Removed {len(failed)} failed row(s) from {CATALOGUE_NAME} to retry them.")
+                    else:
+                        yield say(f"{CATALOGUE_NAME} is locked. Old failed rows stay in it; the newest row for a track counts.")
+
+        files = list_audio_files(folder, include_sub)
+        todo  = [p for p in files
+                 if catalogue_key(os.path.relpath(os.path.dirname(p), folder), os.path.basename(p)) not in done]
+        yield say(f"{len(files)} audio file(s) found, {len(files) - len(todo)} already in the catalogue, {len(todo)} to analyse.")
+        if todo:
+            yield say("Loading model...")
+
+        ok = failed_n = 0
+        for i, path in enumerate(todo, 1):
+            if batch_stop.is_set():
+                yield say(f"Stopped after {i - 1} of {len(todo)} track(s).")
+                break
+            row = analyse_track(path, folder)
+            rel = os.path.relpath(path, folder)
+            if row["status"] == "ok":
+                ok += 1
+                result = (f'{row["genre_1"]} {row["genre_1_pct"]:.0f}% · '
+                          f'{row["subgenre_1"]} {row["subgenre_1_pct"]:.0f}%')
+            else:
+                failed_n += 1
+                result = f'FAILED: {row["error"][:120]}'
+            batch_pending.setdefault(csv_path, []).append(row)
+            saved = flush_pending(csv_path)
+            note = "" if saved else f'  (CSV locked, {len(batch_pending[csv_path])} row(s) held in memory)'
+            yield say(f"[{i}/{len(todo)}] {rel} → {result}{note}")
+        else:
+            if todo:
+                yield say(f"Finished. {ok} ok, {failed_n} failed.")
+
+        # Keep trying to save held rows until the CSV is free or Stop is pressed
+        warned = False
+        while batch_pending.get(csv_path):
+            if flush_pending(csv_path):
+                yield say(f"Saved held rows to {CATALOGUE_NAME}.")
+                break
+            if batch_stop.is_set():
+                yield say(f"{len(batch_pending[csv_path])} row(s) still held in memory. "
+                          "They are saved on the next Start for this folder while SGD stays open.")
+                break
+            if not warned:
+                yield say(f"{CATALOGUE_NAME} is locked, probably open in Excel. Close it to save "
+                          f"{len(batch_pending[csv_path])} held row(s). Retrying every 3 seconds...")
+                warned = True
+            time.sleep(3)
+    finally:
+        batch_lock.release()
+
+def stop_batch():
+    batch_stop.set()
+
+# ---------------------------------------------------------------------------
 # CSS — minimal, stable
 # ---------------------------------------------------------------------------
 CSS = """
@@ -1151,6 +1387,24 @@ with gr.Blocks(title="SGD Portable", css=CSS) as app:
         chart_upper = gr.Plot(show_label=False)
         chart_sub   = gr.Plot(show_label=False)
 
+    # Batch folder mode
+    gr.HTML('<div class="col-label" style="margin-top:18px">Batch</div>')
+    with gr.Row():
+        batch_folder = gr.Textbox(
+            label="Folder", placeholder=r"C:\Music\Album", scale=5,
+        )
+        browse_btn = gr.Button("📁  Browse", scale=1)
+    with gr.Row():
+        batch_sub   = gr.Checkbox(value=True,  label="Include subfolders")
+        batch_retry = gr.Checkbox(value=False, label="Retry tracks that failed before")
+    with gr.Row():
+        batch_start = gr.Button("▶  Start", elem_classes=["analyze-btn"], scale=5)
+        batch_stop_btn = gr.Button("■  Stop", elem_classes=["clear-btn"], scale=1)
+    batch_log = gr.Textbox(
+        label="Progress", lines=10, max_lines=10,
+        interactive=False, autoscroll=True,
+    )
+
     gr.HTML('<div class="sgd-footer">The results are based on probabilities. AI makes mistakes. Please always double-check.</div>')
 
     # ---------------------------------------------------------------------------
@@ -1250,6 +1504,21 @@ with gr.Blocks(title="SGD Portable", css=CSS) as app:
         inputs=[song_selector, top_n, dark_mode],
         outputs=[chart_upper, chart_sub],
     )
+
+
+    browse_btn.click(
+        fn=browse_folder,
+        inputs=[batch_folder],
+        outputs=[batch_folder],
+    )
+
+    batch_start.click(
+        fn=run_batch,
+        inputs=[batch_folder, batch_sub, batch_retry],
+        outputs=[batch_log],
+    )
+
+    batch_stop_btn.click(fn=stop_batch, inputs=[], outputs=[], queue=False)
 
 
     app.load(
