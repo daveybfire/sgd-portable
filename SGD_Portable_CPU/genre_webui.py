@@ -1057,8 +1057,8 @@ def run_batch(folder, include_sub, retry_failed):
             rel = os.path.relpath(path, folder)
             if row["status"] == "ok":
                 ok += 1
-                result = (f'{row["genre_1"]} {row["genre_1_pct"]:.0f}% · '
-                          f'{row["subgenre_1"]} {row["subgenre_1_pct"]:.0f}%')
+                result = (f'{row["genre_1"] or "Unknown"} {row["genre_1_pct"] or 0:.0f}% · '
+                          f'{row["subgenre_1"] or "Unknown"} {row["subgenre_1_pct"] or 0:.0f}%')
             else:
                 failed_n += 1
                 result = f'FAILED: {row["error"][:120]}'
