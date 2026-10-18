@@ -33,6 +33,8 @@ sys.stdout = _SuppressHF(sys.stdout)
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "0"
 import tagcloud
 import track_facts
+import quality
+import release_planner
 
 import pandas as pd  # must import early to avoid circular import with plotly
 import logging
@@ -917,6 +919,7 @@ CATALOGUE_COLUMNS = (
     + [c for i in range(1, 4) for c in (f"genre_{i}", f"genre_{i}_pct")]
     + [c for i in range(1, 6) for c in (f"subgenre_{i}", f"subgenre_{i}_pct")]
     + ["bpm", "key", "camelot", "length", "loudness_db", "energy", "ending"]
+    + ["quality", "enjoyment", "complexity", "usefulness"]
     + ["tags", "status", "error", "model", "analysed_at"]
 )
 BATCH_LOG_LINES = 500
@@ -1041,7 +1044,7 @@ def save_fingerprint(root, row, raw_scores):
     except OSError as e:
         print(f"Could not save fingerprint for {row['file']}: {e}")
 
-def analyse_track(path, root):
+def analyse_track(path, root, score_quality=True):
     rel_folder = os.path.relpath(os.path.dirname(path), root)
     row = {c: "" for c in CATALOGUE_COLUMNS}
     row["file"]   = os.path.basename(path)
@@ -1052,6 +1055,8 @@ def analyse_track(path, root):
         style_scores, upper_scores, raw_scores = classify_genre(path, y=y, return_raw=True)
         row.update(track_facts.track_facts(y, SR, path))
         row["lane"], row["artist"] = track_facts.pick_lane(style_scores, row["bpm"] or None)
+        if score_quality:
+            row.update(quality.score(y))
         best_upper = max(upper_scores.items(), key=lambda x: x[1]) if upper_scores else ("Unknown", 0)
         top_subs   = [k.split("---")[-1] for k in list(style_scores.keys())[:5]]
         tags       = get_tags(best_upper[0], top_subs, style_scores)
@@ -1069,7 +1074,7 @@ def analyse_track(path, root):
     row["analysed_at"] = datetime.now().isoformat(timespec="seconds")
     return row
 
-def run_batch(folder, include_sub, retry_failed):
+def run_batch(folder, include_sub, retry_failed, score_quality=True):
     log = []
     def say(msg):
         log.append(msg)
@@ -1132,19 +1137,22 @@ def run_batch(folder, include_sub, retry_failed):
         yield say(f"{len(files)} audio file(s) found, {len(files) - len(todo)} already in the catalogue, {len(todo)} to analyse.")
         if todo:
             yield say("Loading model...")
+            if score_quality and not quality.available():
+                yield say(f"Quality scores are off: {quality.unavailable_reason()}")
 
         ok = failed_n = 0
         for i, path in enumerate(todo, 1):
             if batch_stop.is_set():
                 yield say(f"Stopped after {i - 1} of {len(todo)} track(s).")
                 break
-            row = analyse_track(path, folder)
+            row = analyse_track(path, folder, score_quality)
             rel = os.path.relpath(path, folder)
             if row["status"] == "ok":
                 ok += 1
                 result = (f'{row["genre_1"] or "Unknown"} {row["genre_1_pct"] or 0:.0f}% · '
                           f'{row["subgenre_1"] or "Unknown"} {row["subgenre_1_pct"] or 0:.0f}% · '
-                          f'{row["bpm"]} BPM {row["camelot"]} · {row["lane"]}')
+                          f'{row["bpm"]} BPM {row["camelot"]} · {row["lane"]}'
+                          + (f' · quality {row["quality"]}' if row["quality"] != "" else ""))
             else:
                 failed_n += 1
                 result = f'FAILED: {row["error"][:120]}'
@@ -1176,6 +1184,14 @@ def run_batch(folder, include_sub, retry_failed):
 
 def stop_batch():
     batch_stop.set()
+
+def plan_releases(folder, size):
+    if batch_lock.locked():
+        return "A batch is running. Wait for it to finish or press Stop first."
+    try:
+        return "\n".join(release_planner.plan(folder, size, CATALOGUE_NAME, FINGERPRINT_NAME))
+    except OSError as e:
+        return f"Could not plan releases: {e}"
 
 # ---------------------------------------------------------------------------
 # CSS — minimal, stable
@@ -1483,6 +1499,7 @@ with gr.Blocks(title="SGD Portable CUDA", css=CSS) as app:
     with gr.Row():
         batch_sub   = gr.Checkbox(value=True,  label="Include subfolders")
         batch_retry = gr.Checkbox(value=False, label="Retry tracks that failed before")
+        batch_quality = gr.Checkbox(value=True, label="Score quality (slower)")
     with gr.Row():
         batch_start = gr.Button("▶  Start", elem_classes=["analyze-btn"], scale=5)
         batch_stop_btn = gr.Button("■  Stop", elem_classes=["clear-btn"], scale=1)
@@ -1490,6 +1507,10 @@ with gr.Blocks(title="SGD Portable CUDA", css=CSS) as app:
         label="Progress", lines=10, max_lines=10,
         interactive=False, autoscroll=True,
     )
+    with gr.Row():
+        plan_size = gr.Number(value=6, precision=0, minimum=2, maximum=20,
+                              label="Tracks per release", scale=1)
+        plan_btn  = gr.Button("📀  Plan releases", scale=5)
 
     gr.HTML('<div class="sgd-footer">The results are based on probabilities. AI makes mistakes. Please always double-check.</div>')
 
@@ -1600,7 +1621,13 @@ with gr.Blocks(title="SGD Portable CUDA", css=CSS) as app:
 
     batch_start.click(
         fn=run_batch,
-        inputs=[batch_folder, batch_sub, batch_retry],
+        inputs=[batch_folder, batch_sub, batch_retry, batch_quality],
+        outputs=[batch_log],
+    )
+
+    plan_btn.click(
+        fn=plan_releases,
+        inputs=[batch_folder, plan_size],
         outputs=[batch_log],
     )
 

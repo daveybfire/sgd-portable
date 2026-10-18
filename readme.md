@@ -108,12 +108,21 @@ Results go into `sgd_catalogue.csv` in the chosen folder. Each track gets a row 
 - top 3 **genres** and top 5 **subgenres** with %. Each style is scored on its own, so a genre's % is its strongest style and the numbers do not add up to 100
 - **bpm**, **key**, **camelot** (the key on the Camelot wheel used for harmonic mixing), **length**, **loudness_db** and **energy** (1-10)
 - **ending**: clean, fade, cut off or long silence. A rough check to spot tracks that stop dead
+- **quality**, **enjoyment**, **complexity** and **usefulness** (about 1-10) from Meta's [Audiobox Aesthetics](https://huggingface.co/facebook/audiobox-aesthetics) model (CC BY 4.0). Untick **Score quality (slower)** to skip them
 - tags, status, error, model and time of analysis
 
 Every track's full set of style scores also goes into `sgd_fingerprints.jsonl` in the same folder, for grouping and album building later.
 
 ### Lanes
 `lanes.csv` next to `genre_webui.py` sets out up to five lanes, one per artist name. Each row lists styles separated by `;` and an optional BPM range. A track goes to the lane with the strongest matching style, or `Unsorted`. Put your artist names in the `artist_name` column. Edits apply from the next track.
+
+### Plan releases
+After a batch, set **Tracks per release** and click **📀 Plan releases**. SGD writes two files next to the catalogue:
+
+- `sgd_listen_first.csv`: the best take of every idea, best first, then the other takes. Takes are ranked by quality and enjoyment, and a track that stops dead loses a point
+- `sgd_releases.csv`: suggested EPs (up to 7 tracks) or albums, one lane at a time. Each release uses the best take of each idea, never two takes of one idea. Its tracks sound alike, sit within about 5% of the same BPM and mix well by key. They are ordered to build to a peak about two thirds in and ease off at the end
+
+Both are suggestions to edit in Excel. Plan again whenever the catalogue grows.
 
 > 💡 A catalogue made by an older SGD version is renamed to `sgd_catalogue_old_<date>.csv` and the folder is analysed again from scratch.
 

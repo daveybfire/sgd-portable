@@ -49,7 +49,7 @@ del "%GETPIP%" 2>nul
 echo pip OK
 
 :packages_check
-if exist "%PACKAGES_OK%" goto model_check
+if exist "%PACKAGES_OK%" goto extras_check
 
 echo [3/4] Installing packages (one-time setup)...
 echo.
@@ -80,13 +80,22 @@ echo packages_ok > "%PACKAGES_OK%"
 echo.
 echo  All packages installed successfully.
 
+:extras_check
+if exist "%PYTHON_DIR%\Lib\site-packages\audiobox_aesthetics" goto model_check
+echo [3c] Installing quality score model package (one-time, small)...
+for /f "usebackq delims=" %%v in (`"%PYTHON_EXE%" -c "import torch; print(torch.__version__.split('+')[0])"`) do set "TORCH_VER=%%v"
+"%PYTHON_EXE%" -m pip install --no-warn-script-location --no-deps --target="%PYTHON_DIR%\Lib\site-packages" torchaudio==%TORCH_VER% --index-url https://download.pytorch.org/whl/cpu >> install.log 2>&1
+rem --no-deps keeps pip from replacing torch; the light dependencies are listed here
+"%PYTHON_EXE%" -m pip install --no-warn-script-location --no-deps --target="%PYTHON_DIR%\Lib\site-packages" audiobox_aesthetics submitit cloudpickle rich markdown-it-py mdurl pygments tqdm safetensors requests charset-normalizer idna urllib3 certifi >> install.log 2>&1
+if errorlevel 1 ( echo WARNING: Quality score package failed. SGD runs without quality scores. See install.log ) else ( echo     quality score package OK )
+
 :model_check
-if exist "%MODEL_DIR%\hub\models--mtg-upf--discogs-maest-10s-fs-129e" goto launch
+if exist "%MODEL_DIR%\hub\models--mtg-upf--discogs-maest-30s-pw-129e-519l" goto launch
 
 echo [4/4] Downloading MAEST model (~350 MB, one-time)...
 echo  This is the AI model for genre detection.
 echo.
-"%PYTHON_EXE%" -c "import os,sys,warnings; warnings.filterwarnings('ignore'); p=sys.argv[1]; os.environ['HF_HOME']=p; os.environ['HF_HUB_DISABLE_IMPLICIT_TOKEN']='1'; os.environ['HF_HUB_DISABLE_SYMLINKS_WARNING']='1'; from huggingface_hub import snapshot_download; snapshot_download('mtg-upf/discogs-maest-10s-fs-129e')" "%MODEL_DIR%" >> install.log 2>&1
+"%PYTHON_EXE%" -c "import os,sys,warnings; warnings.filterwarnings('ignore'); p=sys.argv[1]; os.environ['HF_HOME']=p; os.environ['HF_HUB_DISABLE_IMPLICIT_TOKEN']='1'; os.environ['HF_HUB_DISABLE_SYMLINKS_WARNING']='1'; from huggingface_hub import snapshot_download; snapshot_download('mtg-upf/discogs-maest-30s-pw-129e-519l')" "%MODEL_DIR%" >> install.log 2>&1
 if errorlevel 1 (
     echo WARNING: Model download failed. It will be downloaded on first use.
 ) else (
