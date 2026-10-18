@@ -114,7 +114,7 @@ Results go into `sgd_catalogue.csv` in the chosen folder. Each track gets a row 
 Every track's full set of style scores also goes into `sgd_fingerprints.jsonl` in the same folder, for grouping and album building later.
 
 ### Lanes
-`lanes.csv` next to `genre_webui.py` sets out up to five lanes, one per artist name. Each row lists styles separated by `;` and an optional BPM range. A track goes to the lane with the strongest matching style, or `Unsorted`. Put your artist names in the `artist_name` column. Edits apply from the next track.
+`lanes.csv` next to `genre_webui.py` sets out up to five lanes, one per artist name. Each row lists styles separated by `;`, an optional BPM range and an optional weight. A track goes to the lane with the strongest matching style times its weight, or `Unsorted`. Plain House has a weight of 0.6, so a more specific style like Deep House or Tech House decides when there is one. Put your artist names in the `artist_name` column. Edits apply from the next track.
 
 ### Plan releases
 After a batch, set **Tracks per release** and click **📀 Plan releases**. SGD writes two files next to the catalogue:

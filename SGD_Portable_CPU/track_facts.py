@@ -38,6 +38,32 @@ def estimate_bpm(y, sr):
         bpm /= 2
     return round(float(bpm), 1)
 
+# The beat tracker sometimes locks onto a half, double, 2/3 or 3/4 pulse.
+# When the track's top style says where the tempo should sit, move it there.
+STYLE_BPM = [
+    ((115, 135), {"house", "deep house", "tech house", "techno", "minimal", "minimal techno",
+                  "deep techno", "progressive house", "acid house", "tribal house", "electro house",
+                  "garage house", "ghetto house", "euro house", "hip-house", "tropical house",
+                  "nu-disco", "disco", "uk garage", "speed garage", "bassline", "uk funky",
+                  "italo house", "hard house", "dance-pop", "eurodance"}),
+    ((160, 180), {"drum n bass", "jungle", "juke", "footwork"}),
+    ((135, 150), {"dubstep", "halftime", "grime", "trap"}),
+]
+BPM_STEPS = (2, 0.5, 1.5, 4 / 3, 0.75, 2 / 3)
+
+def fit_bpm_to_style(bpm, style_scores):
+    if bpm is None or not style_scores:
+        return bpm
+    top = max(style_scores.items(), key=lambda x: x[1])[0].lower()
+    for (lo, hi), styles in STYLE_BPM:
+        if top in styles:
+            if lo <= bpm <= hi:
+                return bpm
+            for step in BPM_STEPS:
+                if lo <= bpm * step <= hi:
+                    return round(bpm * step, 1)
+    return bpm
+
 # ---------------------------------------------------------------------------
 # Key (Krumhansl-Schmuckler profiles on the average chroma)
 # ---------------------------------------------------------------------------
@@ -71,11 +97,20 @@ def estimate_key(y, sr):
 def _db(x):
     return 20 * np.log10(np.maximum(x, 1e-9))
 
-def loudness_and_energy(y):
-    """Average loudness in dBFS (RMS) and a rough 1-10 energy score."""
+def loudness_and_energy(y, sr=16000):
+    """Average loudness in dBFS (RMS) and a rough 1-10 energy score.
+    Energy uses the loud parts (top 10% of half-second frames), so a quiet
+    intro or break does not drag a banging track down."""
     rms_db = float(_db(np.sqrt(np.mean(y ** 2))))
-    # -30 dBFS (quiet) maps to 1, -8 dBFS (loud master) maps to 10
-    energy = int(round(np.clip((rms_db + 30) / 22 * 9 + 1, 1, 10)))
+    frame = sr // 2
+    n = len(y) // frame
+    if n >= 4:
+        frames = np.sqrt(np.mean(y[:n * frame].reshape(n, frame) ** 2, axis=1))
+        loud_db = float(_db(np.percentile(frames, 90)))
+    else:
+        loud_db = rms_db
+    # -26 dBFS (quiet) maps to 1, -6 dBFS (loud master) maps to 10
+    energy = int(round(np.clip((loud_db + 26) / 20 * 9 + 1, 1, 10)))
     return round(rms_db, 1), energy
 
 def ending_type(y, sr):
@@ -157,6 +192,7 @@ def load_lanes():
             "styles":  {s.strip().lower() for s in re.split(r"[;|]", row.get("styles") or "") if s.strip()},
             "bpm_min": _num(row.get("bpm_min")),
             "bpm_max": _num(row.get("bpm_max")),
+            "weight":  _num(row.get("weight")) or 1.0,
         })
     _lanes, _lanes_mtime = lanes, mtime
     return lanes
@@ -170,7 +206,7 @@ def pick_lane(style_scores, bpm):
                 continue
             if lane["bpm_max"] is not None and bpm >= lane["bpm_max"]:
                 continue
-        score = max((s for st, s in style_scores.items() if st.lower() in lane["styles"]), default=0)
+        score = lane["weight"] * max((s for st, s in style_scores.items() if st.lower() in lane["styles"]), default=0)
         if score > best_score:
             best_lane, best_artist, best_score = lane["lane"], lane["artist"], score
     return best_lane, best_artist
@@ -178,10 +214,10 @@ def pick_lane(style_scores, bpm):
 # ---------------------------------------------------------------------------
 # All facts for one track
 # ---------------------------------------------------------------------------
-def track_facts(y, sr, filename):
-    bpm = estimate_bpm(y, sr)
+def track_facts(y, sr, filename, style_scores=None):
+    bpm = fit_bpm_to_style(estimate_bpm(y, sr), style_scores)
     key, camelot = estimate_key(y, sr)
-    loudness, energy = loudness_and_energy(y)
+    loudness, energy = loudness_and_energy(y, sr)
     return {
         "idea":        idea_name(filename),
         "bpm":         bpm if bpm is not None else "",

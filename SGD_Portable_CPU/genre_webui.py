@@ -1036,7 +1036,7 @@ def analyse_track(path, root, score_quality=True):
     try:
         y = load_audio(path)
         style_scores, upper_scores, raw_scores = classify_genre(path, y=y, return_raw=True)
-        row.update(track_facts.track_facts(y, SR, path))
+        row.update(track_facts.track_facts(y, SR, path, style_scores))
         row["lane"], row["artist"] = track_facts.pick_lane(style_scores, row["bpm"] or None)
         if score_quality:
             row.update(quality.score(y))
