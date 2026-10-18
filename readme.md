@@ -133,6 +133,9 @@ All three are suggestions to edit in Excel. Plan again whenever the catalogue gr
 ### Listen
 Click **🎧 Load listen list** to play the listen-first list in order. Rate each track with **Keep**, **Maybe** or **Bin**, or press K, M or B on the keyboard. S skips. Each choice saves straight away to `sgd_choices.csv` and the next track starts. The **Play** box picks the best takes you have not rated yet, every take you have not rated yet, or everything. Click **Plan releases** afterwards so the files use your choices.
 
+### Library report
+Click **📊 Library report** to build `sgd_report.html` next to the catalogue and open it in your browser. It shows a sound map where tracks that sound alike sit close together, coloured by lane, charts of lanes, subgenres, BPM, keys, energy, quality, loudness, vocals and moods, and each planned release as a strip with its energy and key moves. Click any dot or track to play it. Build it again after a batch or after planning releases.
+
 ### Find tracks
 Type a description such as `warm Rhodes deep house with a female vocal` and click **🔎 Find**. SGD lists the 25 closest tracks and saves them to `sgd_search.csv`.
 

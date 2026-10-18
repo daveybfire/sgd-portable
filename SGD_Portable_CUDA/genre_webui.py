@@ -37,6 +37,7 @@ import quality
 import clap_tags
 import audio_id
 import release_planner
+import library_report
 
 import pandas as pd  # must import early to avoid circular import with plotly
 import logging
@@ -1227,6 +1228,16 @@ def plan_releases(folder, size):
     except OSError as e:
         return f"Could not plan releases: {e}"
 
+def build_report(folder):
+    if batch_lock.locked():
+        return "A batch is running. Wait for it to finish or press Stop first."
+    lines = library_report.write_report(folder, CATALOGUE_NAME, FINGERPRINT_NAME)
+    path = os.path.join((folder or "").strip().strip('"'), library_report.REPORT_NAME)
+    if os.path.exists(path) and lines[-1].startswith("Wrote"):
+        import webbrowser
+        webbrowser.open("file:///" + os.path.abspath(path).replace("\\", "/"))
+    return "\n".join(lines)
+
 def search_tracks(folder, text):
     folder = (folder or "").strip().strip('"')
     text = (text or "").strip()
@@ -1662,7 +1673,8 @@ with gr.Blocks(title="SGD Portable CUDA", css=CSS) as app:
     with gr.Row():
         plan_size = gr.Number(value=6, precision=0, minimum=2, maximum=20,
                               label="Tracks per release", scale=1)
-        plan_btn  = gr.Button("📀  Plan releases", scale=5)
+        plan_btn  = gr.Button("📀  Plan releases", scale=3)
+        report_btn = gr.Button("📊  Library report", scale=2)
     with gr.Row():
         search_text = gr.Textbox(label="Find tracks that sound like",
                                  placeholder="warm Rhodes deep house with a female vocal", scale=5)
@@ -1810,6 +1822,7 @@ with gr.Blocks(title="SGD Portable CUDA", css=CSS) as app:
         outputs=[batch_log],
     )
 
+    report_btn.click(fn=build_report, inputs=[batch_folder], outputs=[batch_log])
     search_btn.click(fn=search_tracks, inputs=[batch_folder, search_text], outputs=[search_table, batch_log])
     search_text.submit(fn=search_tracks, inputs=[batch_folder, search_text], outputs=[search_table, batch_log])
     released_btn.click(fn=check_released, inputs=[batch_folder, acoustid_key], outputs=[batch_log])
