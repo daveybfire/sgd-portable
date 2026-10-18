@@ -1,0 +1,41 @@
+group,pick,tag,prompt
+vocals,1,instrumental,an instrumental track with no vocals
+vocals,1,female vocal,a song with a female singer
+vocals,1,male vocal,a song with a male singer
+vocals,1,rap,a track with rap vocals
+mood,2,uplifting,uplifting and euphoric music
+mood,2,happy,happy and cheerful music
+mood,2,dark,dark and moody music
+mood,2,melancholic,sad and melancholic music
+mood,2,dreamy,dreamy and atmospheric music
+mood,2,chilled,relaxed and chilled music
+mood,2,sensual,sexy and sensual music
+mood,2,aggressive,aggressive and intense music
+mood,2,groovy,funky and groovy music
+mood,2,hypnotic,hypnotic and repetitive music
+mood,2,nostalgic,nostalgic music
+mood,2,romantic,romantic music
+instruments,3,piano,piano
+instruments,3,electric piano,Rhodes electric piano
+instruments,3,organ,organ
+instruments,3,acoustic guitar,acoustic guitar
+instruments,3,electric guitar,electric guitar
+instruments,3,strings,string section
+instruments,3,brass,brass section
+instruments,3,saxophone,saxophone
+instruments,3,trumpet,trumpet
+instruments,3,flute,flute
+instruments,3,synth pads,warm synth pads
+instruments,3,synth lead,synth lead melody
+instruments,3,arpeggio,arpeggiated synth
+instruments,3,acid bass,acid 303 bassline
+instruments,3,sub bass,deep sub bass
+instruments,3,808,808 bass and trap hi-hats
+instruments,3,vocal chops,chopped vocal samples
+instruments,3,percussion,congas and hand percussion
+instruments,3,breakbeat,breakbeat drums
+instruments,3,banjo,banjo
+instruments,3,fiddle,fiddle
+instruments,3,pedal steel,pedal steel guitar
+instruments,3,harmonica,harmonica
+instruments,3,choir,choir

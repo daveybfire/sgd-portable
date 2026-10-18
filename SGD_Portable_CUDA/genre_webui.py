@@ -34,6 +34,8 @@ os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "0"
 import tagcloud
 import track_facts
 import quality
+import clap_tags
+import audio_id
 import release_planner
 
 import pandas as pd  # must import early to avoid circular import with plotly
@@ -906,6 +908,7 @@ def on_clear(dark_mode, show_tags):
 import csv
 import threading
 import time
+import shutil
 import subprocess
 from datetime import datetime
 
@@ -918,8 +921,9 @@ CATALOGUE_COLUMNS = (
     ["file", "folder", "idea", "lane", "artist"]
     + [c for i in range(1, 4) for c in (f"genre_{i}", f"genre_{i}_pct")]
     + [c for i in range(1, 6) for c in (f"subgenre_{i}", f"subgenre_{i}_pct")]
-    + ["bpm", "key", "camelot", "length", "loudness_db", "energy", "ending"]
+    + ["bpm", "key", "camelot", "length", "lufs", "true_peak_db", "energy", "ending"]
     + ["quality", "enjoyment", "complexity", "usefulness"]
+    + clap_tags.COLUMNS
     + ["tags", "status", "error", "model", "analysed_at"]
 )
 BATCH_LOG_LINES = 500
@@ -1044,19 +1048,40 @@ def save_fingerprint(root, row, raw_scores):
     except OSError as e:
         print(f"Could not save fingerprint for {row['file']}: {e}")
 
-def analyse_track(path, root, score_quality=True):
+def load_native(path):
+    """(audio at the file's own rate, that rate, mono 16 kHz for the models).
+    The native audio is (channels, samples) for stereo files."""
+    try:
+        native, native_sr = librosa.load(path, sr=None, mono=False)
+    except Exception:
+        y = load_audio(path)
+        return y, SR, y
+    mono = native.mean(axis=0) if native.ndim == 2 else native
+    y = mono if native_sr == SR else librosa.resample(mono, orig_sr=native_sr, target_sr=SR)
+    return native, native_sr, y
+
+def analyse_track(path, root, score_quality=True, tag_clap=True):
     rel_folder = os.path.relpath(os.path.dirname(path), root)
     row = {c: "" for c in CATALOGUE_COLUMNS}
     row["file"]   = os.path.basename(path)
     row["folder"] = rel_folder
     row["model"]  = MODEL_ID
     try:
-        y = load_audio(path)
+        native, native_sr, y = load_native(path)
         style_scores, upper_scores, raw_scores = classify_genre(path, y=y, return_raw=True)
         row.update(track_facts.track_facts(y, SR, path, style_scores))
+        row["lufs"], row["true_peak_db"] = track_facts.lufs_and_peak(native, native_sr)
         row["lane"], row["artist"] = track_facts.pick_lane(style_scores, row["bpm"] or None)
         if score_quality:
             row.update(quality.score(y))
+        clap_vec = None
+        if tag_clap:
+            mono = native.mean(axis=0) if native.ndim == 2 else native
+            tags48 = librosa.resample(mono, orig_sr=native_sr, target_sr=clap_tags.SR)
+            clap_cols, clap_vec = clap_tags.analyse(tags48)
+            row.update(clap_cols)
+        del native
+        chroma_print = audio_id.fingerprint(path)
         best_upper = max(upper_scores.items(), key=lambda x: x[1]) if upper_scores else ("Unknown", 0)
         top_subs   = [k.split("---")[-1] for k in list(style_scores.keys())[:5]]
         tags       = get_tags(best_upper[0], top_subs, style_scores)
@@ -1067,6 +1092,10 @@ def analyse_track(path, root, score_quality=True):
         row["tags"]   = ", ".join(tags)
         row["status"] = "ok"
         save_fingerprint(root, row, raw_scores)
+        if clap_vec is not None:
+            clap_tags.save_embedding(root, row, clap_vec)
+        if chroma_print:
+            audio_id.save_print(root, row, chroma_print)
     except Exception as e:
         print(f"ERROR processing {path}: {e}")
         row["status"] = "failed"
@@ -1074,7 +1103,7 @@ def analyse_track(path, root, score_quality=True):
     row["analysed_at"] = datetime.now().isoformat(timespec="seconds")
     return row
 
-def run_batch(folder, include_sub, retry_failed, score_quality=True):
+def run_batch(folder, include_sub, retry_failed, score_quality=True, tag_clap=True):
     log = []
     def say(msg):
         log.append(msg)
@@ -1097,7 +1126,7 @@ def run_batch(folder, include_sub, retry_failed, score_quality=True):
         if old_header and old_header != CATALOGUE_COLUMNS and not batch_pending.get(csv_path):
             stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
             try:
-                for name in (CATALOGUE_NAME, FINGERPRINT_NAME):
+                for name in (CATALOGUE_NAME, FINGERPRINT_NAME, clap_tags.EMBED_NAME, audio_id.PRINT_NAME):
                     src = os.path.join(folder, name)
                     if os.path.exists(src):
                         base, ext = os.path.splitext(name)
@@ -1139,19 +1168,24 @@ def run_batch(folder, include_sub, retry_failed, score_quality=True):
             yield say("Loading model...")
             if score_quality and not quality.available():
                 yield say(f"Quality scores are off: {quality.unavailable_reason()}")
+            if tag_clap and not clap_tags.available():
+                yield say(f"Vocal, mood and instrument tags are off: {clap_tags.unavailable_reason()}")
+            if not audio_id.available():
+                yield say("fpcalc not found, so no duplicate check. Run start_cpu.bat again to install it.")
 
         ok = failed_n = 0
         for i, path in enumerate(todo, 1):
             if batch_stop.is_set():
                 yield say(f"Stopped after {i - 1} of {len(todo)} track(s).")
                 break
-            row = analyse_track(path, folder, score_quality)
+            row = analyse_track(path, folder, score_quality, tag_clap)
             rel = os.path.relpath(path, folder)
             if row["status"] == "ok":
                 ok += 1
                 result = (f'{row["genre_1"] or "Unknown"} {row["genre_1_pct"] or 0:.0f}% · '
                           f'{row["subgenre_1"] or "Unknown"} {row["subgenre_1_pct"] or 0:.0f}% · '
                           f'{row["bpm"]} BPM {row["camelot"]} · {row["lane"]}'
+                          + (f' · {row["vocals"]}' if row["vocals"] else "")
                           + (f' · quality {row["quality"]}' if row["quality"] != "" else ""))
             else:
                 failed_n += 1
@@ -1185,13 +1219,130 @@ def run_batch(folder, include_sub, retry_failed, score_quality=True):
 def stop_batch():
     batch_stop.set()
 
-def plan_releases(folder, size):
+def plan_releases(folder, size, folder_is_song=True):
     if batch_lock.locked():
         return "A batch is running. Wait for it to finish or press Stop first."
     try:
-        return "\n".join(release_planner.plan(folder, size, CATALOGUE_NAME, FINGERPRINT_NAME))
+        return "\n".join(release_planner.plan(folder, size, CATALOGUE_NAME, FINGERPRINT_NAME, folder_is_song))
     except OSError as e:
         return f"Could not plan releases: {e}"
+
+def search_tracks(folder, text):
+    folder = (folder or "").strip().strip('"')
+    text = (text or "").strip()
+    if not text:
+        return gr.update(), "Type what you are looking for, e.g. warm Rhodes deep house with a female vocal."
+    if not os.path.isdir(folder):
+        return gr.update(), "Folder not found. Enter a folder path or use Browse."
+    try:
+        hits = clap_tags.search(folder, text)
+    except ValueError as e:
+        return gr.update(), str(e)
+    rows = [[f"{sim * 100:.0f}", sub, file] for sim, sub, file in hits]
+    try:
+        release_planner._write_csv(os.path.join(folder, "sgd_search.csv"), ["match", "folder", "file"],
+                                   [dict(zip(["match", "folder", "file"], r)) for r in rows])
+    except OSError:
+        pass
+    return rows, f"Closest {len(rows)} track(s) to \"{text}\". Also saved to sgd_search.csv."
+
+def check_released(folder, key):
+    folder = (folder or "").strip().strip('"')
+    if not os.path.isdir(folder):
+        yield "Folder not found. Enter a folder path or use Browse."
+        return
+    key = audio_id.save_key(key) or audio_id.read_key()
+    if not key:
+        yield "Paste your AcoustID application key first. Get one free at acoustid.org/new-application."
+        return
+    if not batch_lock.acquire(blocking=False):
+        yield "A batch is running. Wait for it to finish or press Stop first."
+        return
+    try:
+        batch_stop.clear()
+        log = []
+        for line in audio_id.check_released(folder, key, batch_stop):
+            log.append(line)
+            yield "\n".join(log[-BATCH_LOG_LINES:])
+    finally:
+        batch_lock.release()
+
+# ---------------------------------------------------------------------------
+# Listen: play the listen-first list and mark each take Keep, Maybe or Bin
+# ---------------------------------------------------------------------------
+LISTEN_CACHE   = os.path.join(BASE_DIR, "listen_cache")
+LISTEN_FILTERS = ["Best takes not rated yet", "All takes not rated yet", "Everything"]
+os.makedirs(LISTEN_CACHE, exist_ok=True)
+
+def listen_load(folder, which, folder_is_song, size):
+    folder = (folder or "").strip().strip('"')
+    if not os.path.isdir(folder):
+        return [], 0, None, "Folder not found. Enter a folder path or use Browse.", ""
+    path = os.path.join(folder, release_planner.LISTEN_NAME)
+    note = ""
+    if not os.path.exists(path):
+        note = plan_releases(folder, size, folder_is_song) + "\n\n"
+        if not os.path.exists(path):
+            return [], 0, None, note, ""
+    with open(path, "r", encoding="utf-8-sig", newline="") as f:
+        rows = [r for r in csv.DictReader(f) if r.get("file")]
+    choices = release_planner.read_choices(folder)
+    for r in rows:
+        r["choice"] = choices.get(catalogue_key(r.get("folder"), r["file"]), r.get("choice", ""))
+    if which == LISTEN_FILTERS[0]:
+        rows = [r for r in rows if r.get("pick") == "best take" and not r["choice"]]
+    elif which == LISTEN_FILTERS[1]:
+        rows = [r for r in rows if r.get("pick") != "binned" and not r["choice"]]
+    if not rows:
+        return [], 0, None, note + "Nothing left to rate with this filter.", ""
+    return (rows, 0) + listen_show(folder, rows, 0, note)
+
+def listen_show(folder, rows, idx, note=""):
+    if not rows:
+        return None, note or "Press Load first.", ""
+    if idx >= len(rows):
+        return None, note + "End of the list. Press Plan releases to use your choices.", f"{len(rows)} of {len(rows)}"
+    r = rows[idx]
+    src = os.path.join((folder or "").strip().strip('"'), r.get("folder") or ".", r["file"])
+    for old in os.listdir(LISTEN_CACHE):
+        try:
+            os.remove(os.path.join(LISTEN_CACHE, old))
+        except OSError:
+            pass
+    try:
+        # Gradio only serves files from folders it was told about, so play a copy
+        audio = os.path.join(LISTEN_CACHE, f"{idx}{os.path.splitext(r['file'])[1]}")
+        shutil.copyfile(src, audio)
+    except OSError as e:
+        return None, note + f"Cannot open {src}: {e}", f"{idx + 1} of {len(rows)}"
+    facts = [f"**{r['file']}**" + (f"  ·  {r['folder']}" if r.get("folder") not in ("", ".") else ""),
+             f"Song: {r.get('song', '')} ({r.get('takes_of_song', '?')} take(s)), {r.get('pick', '')}",
+             f"{r.get('lane', '')} · {r.get('subgenre_1', '')} · {r.get('bpm', '')} BPM · {r.get('camelot', '')}"
+             f" · energy {r.get('energy', '')} · {r.get('lufs', '')} LUFS",
+             " · ".join(x for x in (r.get("vocals", ""), r.get("mood_1", ""), r.get("instruments", "")) if x),
+             f"Quality {r.get('quality', '')} · enjoyment {r.get('enjoyment', '')} · score {r.get('score', '')}"
+             f" · ending {r.get('ending', '')}"]
+    if r.get("same_audio_as"):
+        facts.append(f"Same audio as: {r['same_audio_as']}")
+    if r.get("choice"):
+        facts.append(f"Your choice so far: **{r['choice']}**")
+    return audio, note + "  \n".join(f for f in facts if f.strip()), f"{idx + 1} of {len(rows)}"
+
+def listen_choose(folder, rows, idx, choice):
+    folder = (folder or "").strip().strip('"')
+    if not rows or idx >= len(rows):
+        return (rows, idx) + listen_show(folder, rows, idx)
+    r = rows[idx]
+    if not release_planner.save_choice(folder, r["file"], r.get("folder", ""), choice):
+        return (rows, idx) + listen_show(folder, rows, idx,
+                                         f"{release_planner.CHOICES_NAME} is locked, probably open in Excel. "
+                                         "Close it and press the button again.\n\n")
+    r["choice"] = choice
+    return (rows, idx + 1) + listen_show(folder, rows, idx + 1)
+
+def listen_move(folder, rows, idx, step):
+    idx = max(0, min(len(rows), idx + step)) if rows else 0
+    return (idx,) + listen_show(folder, rows, idx)
 
 # ---------------------------------------------------------------------------
 # CSS — minimal, stable
@@ -1500,6 +1651,7 @@ with gr.Blocks(title="SGD Portable CUDA", css=CSS) as app:
         batch_sub   = gr.Checkbox(value=True,  label="Include subfolders")
         batch_retry = gr.Checkbox(value=False, label="Retry tracks that failed before")
         batch_quality = gr.Checkbox(value=True, label="Score quality (slower)")
+        batch_clap = gr.Checkbox(value=True, label="Tag vocals, mood and instruments (slower)")
     with gr.Row():
         batch_start = gr.Button("▶  Start", elem_classes=["analyze-btn"], scale=5)
         batch_stop_btn = gr.Button("■  Stop", elem_classes=["clear-btn"], scale=1)
@@ -1510,7 +1662,35 @@ with gr.Blocks(title="SGD Portable CUDA", css=CSS) as app:
     with gr.Row():
         plan_size = gr.Number(value=6, precision=0, minimum=2, maximum=20,
                               label="Tracks per release", scale=1)
-        plan_btn  = gr.Button("📀  Plan releases", scale=5)
+        plan_folder_song = gr.Checkbox(value=True, label="Each subfolder is one song (Suno workspace)", scale=2)
+        plan_btn  = gr.Button("📀  Plan releases", scale=4)
+    with gr.Row():
+        search_text = gr.Textbox(label="Find tracks that sound like",
+                                 placeholder="warm Rhodes deep house with a female vocal", scale=5)
+        search_btn = gr.Button("🔎  Find", scale=1)
+    search_table = gr.Dataframe(headers=["match", "folder", "file"], interactive=False, wrap=True)
+    with gr.Row():
+        acoustid_key = gr.Textbox(label="AcoustID key (free from acoustid.org/new-application)",
+                                  value=audio_id.read_key(), type="password", scale=5)
+        released_btn = gr.Button("🌐  Check against released music", scale=2)
+
+    # Listen
+    gr.HTML('<div class="col-label" style="margin-top:18px">Listen</div>')
+    listen_rows = gr.State([])
+    listen_idx  = gr.State(0)
+    with gr.Row():
+        listen_filter = gr.Dropdown(choices=LISTEN_FILTERS, value=LISTEN_FILTERS[0],
+                                    label="Play", scale=4)
+        listen_load_btn = gr.Button("🎧  Load listen list", scale=2)
+        listen_pos = gr.Textbox(label="Track", interactive=False, scale=1)
+    listen_audio = gr.Audio(type="filepath", autoplay=True, interactive=False, show_label=False)
+    listen_info = gr.Markdown("Press Load to play the best take of each song, best first.")
+    with gr.Row():
+        listen_back = gr.Button("◀  Back", scale=1)
+        listen_keep = gr.Button("✅  Keep (K)", elem_id="sgd-keep", variant="primary", scale=2)
+        listen_maybe = gr.Button("🤔  Maybe (M)", elem_id="sgd-maybe", scale=2)
+        listen_bin = gr.Button("🗑  Bin (B)", elem_id="sgd-bin", scale=2)
+        listen_skip = gr.Button("Skip  ▶", elem_id="sgd-skip", scale=1)
 
     gr.HTML('<div class="sgd-footer">The results are based on probabilities. AI makes mistakes. Please always double-check.</div>')
 
@@ -1621,15 +1801,31 @@ with gr.Blocks(title="SGD Portable CUDA", css=CSS) as app:
 
     batch_start.click(
         fn=run_batch,
-        inputs=[batch_folder, batch_sub, batch_retry, batch_quality],
+        inputs=[batch_folder, batch_sub, batch_retry, batch_quality, batch_clap],
         outputs=[batch_log],
     )
 
     plan_btn.click(
         fn=plan_releases,
-        inputs=[batch_folder, plan_size],
+        inputs=[batch_folder, plan_size, plan_folder_song],
         outputs=[batch_log],
     )
+
+    search_btn.click(fn=search_tracks, inputs=[batch_folder, search_text], outputs=[search_table, batch_log])
+    search_text.submit(fn=search_tracks, inputs=[batch_folder, search_text], outputs=[search_table, batch_log])
+    released_btn.click(fn=check_released, inputs=[batch_folder, acoustid_key], outputs=[batch_log])
+
+    listen_out = [listen_audio, listen_info, listen_pos]
+    listen_load_btn.click(fn=listen_load, inputs=[batch_folder, listen_filter, plan_folder_song, plan_size],
+                          outputs=[listen_rows, listen_idx] + listen_out)
+    for button, choice in ((listen_keep, "keep"), (listen_maybe, "maybe"), (listen_bin, "bin")):
+        button.click(fn=lambda f, r, i, c=choice: listen_choose(f, r, i, c),
+                     inputs=[batch_folder, listen_rows, listen_idx],
+                     outputs=[listen_rows, listen_idx] + listen_out)
+    listen_back.click(fn=lambda f, r, i: listen_move(f, r, i, -1),
+                      inputs=[batch_folder, listen_rows, listen_idx], outputs=[listen_idx] + listen_out)
+    listen_skip.click(fn=lambda f, r, i: listen_move(f, r, i, 1),
+                      inputs=[batch_folder, listen_rows, listen_idx], outputs=[listen_idx] + listen_out)
 
     batch_stop_btn.click(fn=stop_batch, inputs=[], outputs=[], queue=False)
 
@@ -1658,8 +1854,16 @@ with gr.Blocks(title="SGD Portable CUDA", css=CSS) as app:
                 });
             }
             setTimeout(fixDropzone, 500);
+            // K, M and B rate the track in the Listen section, S skips
+            document.addEventListener('keydown', (e) => {
+                const tag = (e.target.tagName || '').toLowerCase();
+                if (tag === 'input' || tag === 'textarea' || e.ctrlKey || e.altKey || e.metaKey) return;
+                const ids = {k: 'sgd-keep', m: 'sgd-maybe', b: 'sgd-bin', s: 'sgd-skip'};
+                const btn = document.getElementById(ids[e.key.toLowerCase()]);
+                if (btn) { e.preventDefault(); btn.click(); }
+            });
         }"""
     )
 
 if __name__ == "__main__":
-    app.launch(inbrowser=True)
+    app.launch(inbrowser=True, allowed_paths=[LISTEN_CACHE])

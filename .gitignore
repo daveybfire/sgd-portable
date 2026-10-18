@@ -1,2 +1,6 @@
 __pycache__/
 *.pyc
+listen_cache/
+bin/
+acoustid_key.txt
+maest_model/

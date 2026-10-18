@@ -5,13 +5,19 @@
 """
 Release planning from a finished batch catalogue.
 
-- sgd_listen_first.csv: the best take of every idea, best first, then the
-  other takes. Work down it from the top.
+- sgd_listen_first.csv: the best take of every song, best first, then the
+  other takes. Work down it from the top, or use the Listen tab.
 - sgd_releases.csv: suggested EPs or albums, one lane at a time. Tracks in
   a release sound alike, sit in a similar BPM range, mix well by key, never
-  share an idea, and are put in an order with a rise and fall in energy.
+  share a song, and are put in an order with a rise and fall in energy.
+- sgd_same_audio.csv: pairs of tracks that share the same audio.
 
-Both files are plain suggestions to edit in Excel.
+A song is every take with the same idea name, every track in the same
+subfolder (a Suno workspace) when that option is on, and any tracks that
+share audio. Keep, Maybe and Bin from the Listen tab are saved in
+sgd_choices.csv and change the ranking here.
+
+All files are plain suggestions to edit in Excel.
 """
 
 import csv
@@ -22,8 +28,14 @@ from datetime import datetime
 
 import numpy as np
 
+import audio_id
+import clap_tags
+
 LISTEN_NAME   = "sgd_listen_first.csv"
 RELEASES_NAME = "sgd_releases.csv"
+SAME_NAME     = "sgd_same_audio.csv"
+CHOICES_NAME  = "sgd_choices.csv"
+CHOICE_BONUS  = {"keep": 3.0, "maybe": 1.0}
 BPM_TOLERANCE = 0.05        # tracks within 5% of the release's BPM
 MIN_RELEASE   = 3           # fewer tracks than this stay unplaced
 
@@ -38,6 +50,32 @@ def _num(text, default=None):
 
 def _key(folder, file):
     return os.path.normcase(os.path.normpath(os.path.join(folder or ".", file)))
+
+def read_choices(folder):
+    """{track key: keep, maybe or bin}. The last choice for a track wins."""
+    out = {}
+    path = os.path.join(folder, CHOICES_NAME)
+    if not os.path.exists(path):
+        return out
+    with open(path, "r", encoding="utf-8-sig", newline="") as f:
+        for row in csv.DictReader(f):
+            if row.get("file"):
+                out[_key(row.get("folder"), row["file"])] = (row.get("choice") or "").strip().lower()
+    return out
+
+def save_choice(folder, file, sub, choice):
+    """Append one choice. Returns False if the file is locked (open in Excel)."""
+    path = os.path.join(folder, CHOICES_NAME)
+    new = not os.path.exists(path) or os.path.getsize(path) == 0
+    try:
+        with open(path, "a", encoding="utf-8-sig" if new else "utf-8", newline="") as f:
+            w = csv.writer(f)
+            if new:
+                w.writerow(["file", "folder", "choice", "at"])
+            w.writerow([file, sub, choice, datetime.now().isoformat(timespec="seconds")])
+        return True
+    except OSError:
+        return False
 
 def read_tracks(folder, catalogue_name, fingerprint_name):
     """Tracks that analysed fine, newest row per file, with fingerprints attached."""
@@ -56,29 +94,41 @@ def read_tracks(folder, catalogue_name, fingerprint_name):
                 except ValueError:
                     continue
                 prints[_key(d.get("folder"), d.get("file", ""))] = d.get("scores", {})
+    claps = clap_tags.read_embeddings(folder)
+    choices = read_choices(folder)
     tracks = []
     for k, row in rows.items():
         if row.get("status") != "ok":
             continue
         t = dict(row)
+        t["_key"]     = k
         t["_bpm"]     = _num(row.get("bpm"))
         t["_energy"]  = _num(row.get("energy"), 5)
-        t["_rank"]    = rank_score(row)
+        t["_choice"]  = choices.get(k, "")
+        t["_rank"]    = round(rank_score(row) + CHOICE_BONUS.get(t["_choice"], 0), 2)
         t["_print"]   = prints.get(k, {})
+        t["_clap"]    = claps[k][2] if k in claps else None
         tracks.append(t)
     attach_vectors(tracks)
     return tracks
 
 def attach_vectors(tracks):
-    """Turn each fingerprint into a unit vector, so similarity is one dot product."""
+    """Turn each fingerprint into a unit vector, so similarity is one dot product.
+    When CLAP vectors are there, they count half: genre scores say what style a
+    track is, CLAP says more about how it sounds."""
     labels = sorted({k for t in tracks for k in t["_print"]})
     index = {k: i for i, k in enumerate(labels)}
+    clap_dim = max((len(t["_clap"]) for t in tracks if t["_clap"] is not None), default=0)
     for t in tracks:
         v = np.zeros(max(len(labels), 1), dtype=np.float32)
         for k, val in t["_print"].items():
             v[index[k]] = val
         n = np.linalg.norm(v)
-        t["_vec"] = v / n if n else v
+        v = v / n if n else v
+        if clap_dim:
+            c = t["_clap"] if t["_clap"] is not None and len(t["_clap"]) == clap_dim else np.zeros(clap_dim, np.float32)
+            v = np.concatenate([v, c]) / np.sqrt(2)
+        t["_vec"] = v
 
 def rank_score(row):
     """Production quality plus enjoyment when present, else genre confidence."""
@@ -118,34 +168,92 @@ def bpm_close(a, b):
 # ---------------------------------------------------------------------------
 # Listen-first list
 # ---------------------------------------------------------------------------
-def best_takes(tracks):
-    """{idea: [takes best first]}."""
-    ideas = {}
+def group_songs(tracks, same_audio, folder_is_song=True):
+    """Give every track a 'song'. Tracks join one song when they share an idea
+    name, sit in the same subfolder (if folder_is_song), or share audio.
+    Files loose in the top folder are grouped by name and audio only."""
+    parent = list(range(len(tracks)))
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+    def join(i, j):
+        parent[find(i)] = find(j)
+    first = {}
+    for i, t in enumerate(tracks):
+        keys = ["idea:" + (t.get("idea") or t["file"]).lower()]
+        sub = os.path.normcase(os.path.normpath(t.get("folder") or "."))
+        if folder_is_song and sub not in (".", ""):
+            keys.append("folder:" + sub)
+        for k in keys:
+            if k in first:
+                join(i, first[k])
+            else:
+                first[k] = i
+    index = {t["_key"]: i for i, t in enumerate(tracks)}
     for t in tracks:
-        ideas.setdefault(t.get("idea") or t["file"], []).append(t)
-    for takes in ideas.values():
-        takes.sort(key=lambda t: -t["_rank"])
-    return ideas
+        t["_same_audio"] = []
+    for a, b, _, _ in same_audio:
+        if a in index and b in index:
+            join(index[a], index[b])
+            tracks[index[a]]["_same_audio"].append(tracks[index[b]]["file"])
+            tracks[index[b]]["_same_audio"].append(tracks[index[a]]["file"])
+    groups = {}
+    for i, t in enumerate(tracks):
+        groups.setdefault(find(i), []).append(t)
+    for members in groups.values():
+        # Name the song after its most common idea name
+        counts = {}
+        for t in members:
+            name = t.get("idea") or t["file"]
+            counts[name] = counts.get(name, 0) + 1
+        name = min(counts, key=lambda n: (-counts[n], len(n), n))
+        for t in members:
+            t["song"] = name
 
-def write_listen_first(folder, ideas):
+def best_takes(tracks):
+    """{song: [takes best first]}. Binned takes go last."""
+    songs = {}
+    for t in tracks:
+        songs.setdefault(t.get("song") or t.get("idea") or t["file"], []).append(t)
+    for takes in songs.values():
+        takes.sort(key=lambda t: (t["_choice"] == "bin", -t["_rank"]))
+    return songs
+
+def write_listen_first(folder, songs):
+    firsts = [takes[0] for takes in songs.values() if takes[0]["_choice"] != "bin"]
+    rest   = [t for takes in songs.values() for t in takes if t["_choice"] != "bin" and t is not takes[0]]
+    binned = [t for takes in songs.values() for t in takes if t["_choice"] == "bin"]
     rows = []
-    firsts = sorted((takes[0] for takes in ideas.values()), key=lambda t: -t["_rank"])
-    for i, t in enumerate(firsts, 1):
-        rows.append(_listen_row(i, "best take", t, len(ideas[t.get("idea") or t["file"]])))
-    rest = sorted((t for takes in ideas.values() for t in takes[1:]), key=lambda t: -t["_rank"])
-    for i, t in enumerate(rest, len(rows) + 1):
-        rows.append(_listen_row(i, "other take", t, len(ideas[t.get("idea") or t["file"]])))
-    cols = ["order", "pick", "file", "folder", "idea", "takes_of_idea", "score", "lane", "artist",
-            "subgenre_1", "bpm", "camelot", "energy", "ending", "quality", "enjoyment"]
-    _write_csv(os.path.join(folder, LISTEN_NAME), cols, rows)
+    for pick, group in (("best take", firsts), ("other take", rest), ("binned", binned)):
+        for t in sorted(group, key=lambda t: -t["_rank"]):
+            rows.append(_listen_row(len(rows) + 1, pick, t, len(songs[t["song"]])))
+    _write_csv(os.path.join(folder, LISTEN_NAME), LISTEN_COLUMNS, rows)
     return len(firsts)
 
+LISTEN_COLUMNS = ["order", "pick", "choice", "file", "folder", "song", "idea", "takes_of_song",
+                  "same_audio_as", "score", "lane", "artist", "subgenre_1", "bpm", "camelot", "energy",
+                  "ending", "lufs", "vocals", "mood_1", "instruments", "quality", "enjoyment"]
+
 def _listen_row(order, pick, t, n_takes):
-    return {"order": order, "pick": pick, "file": t["file"], "folder": t.get("folder", ""),
-            "idea": t.get("idea", ""), "takes_of_idea": n_takes, "score": t["_rank"],
-            "lane": t.get("lane", ""), "artist": t.get("artist", ""), "subgenre_1": t.get("subgenre_1", ""),
-            "bpm": t.get("bpm", ""), "camelot": t.get("camelot", ""), "energy": t.get("energy", ""),
-            "ending": t.get("ending", ""), "quality": t.get("quality", ""), "enjoyment": t.get("enjoyment", "")}
+    row = {c: t.get(c, "") for c in LISTEN_COLUMNS}
+    row.update({"order": order, "pick": pick, "choice": t["_choice"], "takes_of_song": n_takes,
+                "same_audio_as": "; ".join(t["_same_audio"]), "score": t["_rank"]})
+    return row
+
+def write_same_audio(folder, tracks, same_audio):
+    by_key = {t["_key"]: t for t in tracks}
+    rows = []
+    for a, b, match, secs in sorted(same_audio, key=lambda x: -x[2]):
+        ta, tb = by_key.get(a), by_key.get(b)
+        if ta and tb:
+            rows.append({"file_a": ta["file"], "folder_a": ta.get("folder", ""),
+                         "file_b": tb["file"], "folder_b": tb.get("folder", ""),
+                         "match_pct": round(match * 100), "seconds_shared": secs})
+    _write_csv(os.path.join(folder, SAME_NAME),
+               ["file_a", "folder_a", "file_b", "folder_b", "match_pct", "seconds_shared"], rows)
+    return len(rows)
 
 # ---------------------------------------------------------------------------
 # Releases
@@ -215,11 +323,12 @@ def sequence(members):
         order.append(nxt)
     return order
 
-def write_releases(folder, ideas, size):
+def write_releases(folder, songs, size):
     by_lane = {}
-    for takes in ideas.values():
+    for takes in songs.values():
         best = takes[0]
-        by_lane.setdefault(best.get("lane") or "Unsorted", []).append(best)
+        if best["_choice"] != "bin":
+            by_lane.setdefault(best.get("lane") or "Unsorted", []).append(best)
     kind = "EP" if size <= 7 else "Album"
     rows, summary = [], []
     for lane in sorted(by_lane):
@@ -232,7 +341,8 @@ def write_releases(folder, ideas, size):
                 prev = ordered[pos - 2] if pos > 1 else None
                 rows.append({
                     "release": name, "position": pos, "file": t["file"], "folder": t.get("folder", ""),
-                    "idea": t.get("idea", ""), "lane": lane, "artist": t.get("artist", ""),
+                    "song": t.get("song", ""), "choice": t["_choice"], "vocals": t.get("vocals", ""),
+                    "lane": lane, "artist": t.get("artist", ""),
                     "subgenre_1": t.get("subgenre_1", ""), "bpm": t.get("bpm", ""),
                     "camelot": t.get("camelot", ""), "energy": t.get("energy", ""), "score": t["_rank"],
                     "mixes_with_previous": "" if prev is None else ("yes" if keys_mix(prev.get("camelot"), t.get("camelot")) else "no"),
@@ -241,13 +351,14 @@ def write_releases(folder, ideas, size):
         summary.append((lane, len(releases), len(leftover)))
         for t in leftover:
             rows.append({"release": f"{lane} - unplaced", "position": "", "file": t["file"],
-                         "folder": t.get("folder", ""), "idea": t.get("idea", ""), "lane": lane,
+                         "folder": t.get("folder", ""), "song": t.get("song", ""), "choice": t["_choice"],
+                         "vocals": t.get("vocals", ""), "lane": lane,
                          "artist": t.get("artist", ""), "subgenre_1": t.get("subgenre_1", ""),
                          "bpm": t.get("bpm", ""), "camelot": t.get("camelot", ""),
                          "energy": t.get("energy", ""), "score": t["_rank"],
                          "mixes_with_previous": "", "release_bpm_range": ""})
-    cols = ["release", "position", "file", "folder", "idea", "lane", "artist", "subgenre_1", "bpm",
-            "camelot", "energy", "score", "mixes_with_previous", "release_bpm_range"]
+    cols = ["release", "position", "file", "folder", "song", "choice", "vocals", "lane", "artist",
+            "subgenre_1", "bpm", "camelot", "energy", "score", "mixes_with_previous", "release_bpm_range"]
     _write_csv(os.path.join(folder, RELEASES_NAME), cols, rows)
     return summary, kind
 
@@ -269,7 +380,7 @@ def _write_csv(path, cols, rows):
 # ---------------------------------------------------------------------------
 # Entry point for the web UI
 # ---------------------------------------------------------------------------
-def plan(folder, size, catalogue_name, fingerprint_name):
+def plan(folder, size, catalogue_name, fingerprint_name, folder_is_song=True):
     """Write both files. Returns lines for the progress log."""
     folder = (folder or "").strip().strip('"')
     if not folder or not os.path.isdir(folder):
@@ -282,11 +393,18 @@ def plan(folder, size, catalogue_name, fingerprint_name):
         return ["No analysed tracks in the catalogue yet."]
     if not any(t.get("bpm") for t in tracks):
         return [f"{catalogue_name} comes from an older SGD version. Run the batch again first."]
-    ideas = best_takes(tracks)
-    n_ideas = write_listen_first(folder, ideas)
-    summary, kind = write_releases(folder, ideas, size)
-    lines = [f"{len(tracks)} track(s), {n_ideas} idea(s).",
-             f"Wrote {LISTEN_NAME}: the best take of each idea first, best at the top."]
+    same = audio_id.find_same_audio(audio_id.read_prints(folder))
+    group_songs(tracks, same, folder_is_song)
+    songs = best_takes(tracks)
+    n_same = write_same_audio(folder, tracks, same)
+    n_songs = write_listen_first(folder, songs)
+    summary, kind = write_releases(folder, songs, size)
+    binned = sum(t["_choice"] == "bin" for t in tracks)
+    lines = [f"{len(tracks)} track(s), {len(songs)} song(s)"
+             + (f", {binned} binned" if binned else "") + ".",
+             f"Wrote {LISTEN_NAME}: the best take of each song first, best at the top."]
+    if os.path.exists(os.path.join(folder, audio_id.PRINT_NAME)):
+        lines.append(f"{n_same} pair(s) of tracks share audio. See {SAME_NAME}.")
     if not any(t.get("quality") for t in tracks):
         lines.append("No quality scores in the catalogue, so takes are ranked by genre confidence instead.")
     for lane, n, left in summary:

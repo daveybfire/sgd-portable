@@ -81,7 +81,7 @@ echo.
 echo  All packages installed successfully.
 
 :extras_check
-if exist "%PYTHON_DIR%\Lib\site-packages\audiobox_aesthetics" goto model_check
+if exist "%PYTHON_DIR%\Lib\site-packages\audiobox_aesthetics" goto extras2_check
 echo [3c] Installing quality score model package (one-time, small)...
 for /f "usebackq delims=" %%v in (`"%PYTHON_EXE%" -c "import torch; print(torch.__version__.split('+')[0])"`) do set "TORCH_VER=%%v"
 "%PYTHON_EXE%" -m pip install --no-warn-script-location --no-deps --target="%PYTHON_DIR%\Lib\site-packages" torchaudio==%TORCH_VER% --index-url https://download.pytorch.org/whl/cpu >> install.log 2>&1
@@ -89,7 +89,28 @@ rem --no-deps keeps pip from replacing torch; the light dependencies are listed 
 "%PYTHON_EXE%" -m pip install --no-warn-script-location --no-deps --target="%PYTHON_DIR%\Lib\site-packages" audiobox_aesthetics submitit cloudpickle rich markdown-it-py mdurl pygments tqdm safetensors requests charset-normalizer idna urllib3 certifi >> install.log 2>&1
 if errorlevel 1 ( echo WARNING: Quality score package failed. SGD runs without quality scores. See install.log ) else ( echo     quality score package OK )
 
+:extras2_check
+if exist "%PYTHON_DIR%\Lib\site-packages\pyloudnorm" goto fpcalc_check
+echo [3d] Installing LUFS loudness meter (one-time, small)...
+"%PYTHON_EXE%" -m pip install --no-warn-script-location --target="%PYTHON_DIR%\Lib\site-packages" pyloudnorm future >> install.log 2>&1
+if errorlevel 1 ( echo WARNING: pyloudnorm failed. The LUFS column stays blank. See install.log ) else ( echo     LUFS meter OK )
+
+:fpcalc_check
+if exist "%~dp0bin\fpcalc.exe" goto model_check
+echo [3e] Downloading fpcalc for the duplicate check (one-time, ~3 MB)...
+if not exist "%~dp0bin" mkdir "%~dp0bin"
+curl -L --silent -o "%~dp0bin\fpcalc.zip" "https://github.com/acoustid/chromaprint/releases/download/v1.5.1/chromaprint-fpcalc-1.5.1-windows-x86_64.zip"
+tar -xf "%~dp0bin\fpcalc.zip" -C "%~dp0bin" --strip-components=1 >> install.log 2>&1
+del "%~dp0bin\fpcalc.zip" 2>nul
+if exist "%~dp0bin\fpcalc.exe" ( echo     fpcalc OK ) else ( echo WARNING: fpcalc download failed. SGD runs without the duplicate check. )
+
 :model_check
+if exist "%MODEL_DIR%\hub\models--laion--larger_clap_music" goto maest_check
+echo [4a] Downloading CLAP model for vocal, mood and instrument tags (~800 MB, one-time)...
+"%PYTHON_EXE%" -c "import os,sys,warnings; warnings.filterwarnings('ignore'); p=sys.argv[1]; os.environ['HF_HOME']=p; os.environ['HF_HUB_DISABLE_IMPLICIT_TOKEN']='1'; os.environ['HF_HUB_DISABLE_SYMLINKS_WARNING']='1'; from huggingface_hub import snapshot_download; snapshot_download('laion/larger_clap_music')" "%MODEL_DIR%" >> install.log 2>&1
+if errorlevel 1 ( echo WARNING: CLAP download failed. It will be downloaded on first use. ) else ( echo     CLAP model OK )
+
+:maest_check
 if exist "%MODEL_DIR%\hub\models--mtg-upf--discogs-maest-30s-pw-129e-519l" goto launch
 
 echo [4/4] Downloading MAEST model (~350 MB, one-time)...

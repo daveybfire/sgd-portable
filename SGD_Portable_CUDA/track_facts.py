@@ -113,6 +113,29 @@ def loudness_and_energy(y, sr=16000):
     energy = int(round(np.clip((loud_db + 26) / 20 * 9 + 1, 1, 10)))
     return round(rms_db, 1), energy
 
+def lufs_and_peak(audio, sr):
+    """Integrated loudness in LUFS, the measure streaming services use, and
+    true peak in dBTP. audio is (samples,) or (channels, samples) at the file's
+    own sample rate. Blank if pyloudnorm is missing."""
+    try:
+        import pyloudnorm
+        from scipy.signal import resample_poly
+    except ImportError:
+        return "", ""
+    data = audio.T if audio.ndim == 2 else audio
+    try:
+        lufs = pyloudnorm.Meter(sr).integrated_loudness(data)
+    except ValueError:                          # shorter than one 0.4 s block
+        return "", ""
+    # True peak: oversample 4x, a minute at a time to keep memory low
+    chans = audio if audio.ndim == 2 else audio[None, :]
+    step, peak = sr * 60, 0.0
+    for start in range(0, chans.shape[1], step):
+        piece = chans[:, max(0, start - 64):start + step + 64]
+        peak = max(peak, float(np.max(np.abs(resample_poly(piece, 4, 1, axis=1)))))
+    lufs = round(float(lufs), 1) if np.isfinite(lufs) else ""
+    return lufs, round(float(_db(peak)), 1)
+
 def ending_type(y, sr):
     """clean, fade, cut off or long silence. A rough check, not a verdict."""
     frame = int(sr * 0.1)
@@ -217,14 +240,13 @@ def pick_lane(style_scores, bpm):
 def track_facts(y, sr, filename, style_scores=None):
     bpm = fit_bpm_to_style(estimate_bpm(y, sr), style_scores)
     key, camelot = estimate_key(y, sr)
-    loudness, energy = loudness_and_energy(y, sr)
+    _, energy = loudness_and_energy(y, sr)
     return {
         "idea":        idea_name(filename),
         "bpm":         bpm if bpm is not None else "",
         "key":         key,
         "camelot":     camelot,
         "length":      f"{int(len(y) / sr) // 60}:{int(len(y) / sr) % 60:02d}",
-        "loudness_db": loudness,
         "energy":      energy,
         "ending":      ending_type(y, sr),
     }
