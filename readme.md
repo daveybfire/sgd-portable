@@ -119,7 +119,7 @@ The folder also gets three files the planner and search read: `sgd_fingerprints.
 `lanes.csv` next to `genre_webui.py` sets out up to five lanes, one per artist name. Each row lists styles separated by `;`, an optional BPM range and an optional weight. A track goes to the lane with the strongest matching style times its weight, or `Unsorted`. Plain House has a weight of 0.6, so a more specific style like Deep House or Tech House decides when there is one. Put your artist names in the `artist_name` column. Edits apply from the next track.
 
 ### Songs
-SGD treats takes as one song when they share an idea name, sit in the same subfolder, or share audio. Keep each Suno workspace in its own subfolder and leave **Each subfolder is one song (Suno workspace)** ticked. Untick it if a subfolder holds several different songs. Files loose in the top folder are grouped by name and audio only.
+Takes with the same title once take numbers and tags are removed are one song, so `ACID CELLULOID [E] 001` and `004` never go on the same release.
 
 ### Plan releases
 After a batch, set **Tracks per release** and click **📀 Plan releases**. SGD writes three files next to the catalogue:

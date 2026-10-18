@@ -1202,11 +1202,11 @@ def run_batch(folder, include_sub, retry_failed, score_quality=True, tag_clap=Tr
 def stop_batch():
     batch_stop.set()
 
-def plan_releases(folder, size, folder_is_song=True):
+def plan_releases(folder, size):
     if batch_lock.locked():
         return "A batch is running. Wait for it to finish or press Stop first."
     try:
-        return "\n".join(release_planner.plan(folder, size, CATALOGUE_NAME, FINGERPRINT_NAME, folder_is_song))
+        return "\n".join(release_planner.plan(folder, size, CATALOGUE_NAME, FINGERPRINT_NAME))
     except OSError as e:
         return f"Could not plan releases: {e}"
 
@@ -1257,14 +1257,14 @@ LISTEN_CACHE   = os.path.join(BASE_DIR, "listen_cache")
 LISTEN_FILTERS = ["Best takes not rated yet", "All takes not rated yet", "Everything"]
 os.makedirs(LISTEN_CACHE, exist_ok=True)
 
-def listen_load(folder, which, folder_is_song, size):
+def listen_load(folder, which, size):
     folder = (folder or "").strip().strip('"')
     if not os.path.isdir(folder):
         return [], 0, None, "Folder not found. Enter a folder path or use Browse.", ""
     path = os.path.join(folder, release_planner.LISTEN_NAME)
     note = ""
     if not os.path.exists(path):
-        note = plan_releases(folder, size, folder_is_song) + "\n\n"
+        note = plan_releases(folder, size) + "\n\n"
         if not os.path.exists(path):
             return [], 0, None, note, ""
     with open(path, "r", encoding="utf-8-sig", newline="") as f:
@@ -1645,8 +1645,7 @@ with gr.Blocks(title="SGD Portable", css=CSS) as app:
     with gr.Row():
         plan_size = gr.Number(value=6, precision=0, minimum=2, maximum=20,
                               label="Tracks per release", scale=1)
-        plan_folder_song = gr.Checkbox(value=True, label="Each subfolder is one song (Suno workspace)", scale=2)
-        plan_btn  = gr.Button("📀  Plan releases", scale=4)
+        plan_btn  = gr.Button("📀  Plan releases", scale=5)
     with gr.Row():
         search_text = gr.Textbox(label="Find tracks that sound like",
                                  placeholder="warm Rhodes deep house with a female vocal", scale=5)
@@ -1790,7 +1789,7 @@ with gr.Blocks(title="SGD Portable", css=CSS) as app:
 
     plan_btn.click(
         fn=plan_releases,
-        inputs=[batch_folder, plan_size, plan_folder_song],
+        inputs=[batch_folder, plan_size],
         outputs=[batch_log],
     )
 
@@ -1799,7 +1798,7 @@ with gr.Blocks(title="SGD Portable", css=CSS) as app:
     released_btn.click(fn=check_released, inputs=[batch_folder, acoustid_key], outputs=[batch_log])
 
     listen_out = [listen_audio, listen_info, listen_pos]
-    listen_load_btn.click(fn=listen_load, inputs=[batch_folder, listen_filter, plan_folder_song, plan_size],
+    listen_load_btn.click(fn=listen_load, inputs=[batch_folder, listen_filter, plan_size],
                           outputs=[listen_rows, listen_idx] + listen_out)
     for button, choice in ((listen_keep, "keep"), (listen_maybe, "maybe"), (listen_bin, "bin")):
         button.click(fn=lambda f, r, i, c=choice: listen_choose(f, r, i, c),

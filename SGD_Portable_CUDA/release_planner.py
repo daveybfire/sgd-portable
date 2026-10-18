@@ -12,9 +12,8 @@ Release planning from a finished batch catalogue.
   share a song, and are put in an order with a rise and fall in energy.
 - sgd_same_audio.csv: pairs of tracks that share the same audio.
 
-A song is every take with the same idea name, every track in the same
-subfolder (a Suno workspace) when that option is on, and any tracks that
-share audio. Keep, Maybe and Bin from the Listen tab are saved in
+A song is every take with the same title once take numbers and tags are
+removed, so ACID CELLULOID [E] 001 and 004 are one song. Keep, Maybe and Bin from the Listen tab are saved in
 sgd_choices.csv and change the ranking here.
 
 All files are plain suggestions to edit in Excel.
@@ -168,49 +167,18 @@ def bpm_close(a, b):
 # ---------------------------------------------------------------------------
 # Listen-first list
 # ---------------------------------------------------------------------------
-def group_songs(tracks, same_audio, folder_is_song=True):
-    """Give every track a 'song'. Tracks join one song when they share an idea
-    name, sit in the same subfolder (if folder_is_song), or share audio.
-    Files loose in the top folder are grouped by name and audio only."""
-    parent = list(range(len(tracks)))
-    def find(i):
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
-    def join(i, j):
-        parent[find(i)] = find(j)
-    first = {}
-    for i, t in enumerate(tracks):
-        keys = ["idea:" + (t.get("idea") or t["file"]).lower()]
-        sub = os.path.normcase(os.path.normpath(t.get("folder") or "."))
-        if folder_is_song and sub not in (".", ""):
-            keys.append("folder:" + sub)
-        for k in keys:
-            if k in first:
-                join(i, first[k])
-            else:
-                first[k] = i
-    index = {t["_key"]: i for i, t in enumerate(tracks)}
+def group_songs(tracks, same_audio):
+    """Takes with the same title (idea name) are one song, so
+    ACID CELLULOID [E] 001 and 004 never share a release. Shared audio is
+    only noted, not used for grouping."""
+    index = {t["_key"]: t for t in tracks}
     for t in tracks:
+        t["song"] = t.get("idea") or t["file"]
         t["_same_audio"] = []
     for a, b, _, _ in same_audio:
         if a in index and b in index:
-            join(index[a], index[b])
-            tracks[index[a]]["_same_audio"].append(tracks[index[b]]["file"])
-            tracks[index[b]]["_same_audio"].append(tracks[index[a]]["file"])
-    groups = {}
-    for i, t in enumerate(tracks):
-        groups.setdefault(find(i), []).append(t)
-    for members in groups.values():
-        # Name the song after its most common idea name
-        counts = {}
-        for t in members:
-            name = t.get("idea") or t["file"]
-            counts[name] = counts.get(name, 0) + 1
-        name = min(counts, key=lambda n: (-counts[n], len(n), n))
-        for t in members:
-            t["song"] = name
+            index[a]["_same_audio"].append(index[b]["file"])
+            index[b]["_same_audio"].append(index[a]["file"])
 
 def best_takes(tracks):
     """{song: [takes best first]}. Binned takes go last."""
@@ -380,7 +348,7 @@ def _write_csv(path, cols, rows):
 # ---------------------------------------------------------------------------
 # Entry point for the web UI
 # ---------------------------------------------------------------------------
-def plan(folder, size, catalogue_name, fingerprint_name, folder_is_song=True):
+def plan(folder, size, catalogue_name, fingerprint_name):
     """Write both files. Returns lines for the progress log."""
     folder = (folder or "").strip().strip('"')
     if not folder or not os.path.isdir(folder):
@@ -394,7 +362,7 @@ def plan(folder, size, catalogue_name, fingerprint_name, folder_is_song=True):
     if not any(t.get("bpm") for t in tracks):
         return [f"{catalogue_name} comes from an older SGD version. Run the batch again first."]
     same = audio_id.find_same_audio(audio_id.read_prints(folder))
-    group_songs(tracks, same, folder_is_song)
+    group_songs(tracks, same)
     songs = best_takes(tracks)
     n_same = write_same_audio(folder, tracks, same)
     n_songs = write_listen_first(folder, songs)
