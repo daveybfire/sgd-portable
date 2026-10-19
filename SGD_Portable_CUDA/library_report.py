@@ -122,13 +122,17 @@ def sound_map(tracks, lanes):
 
 def _hover(t):
     bits = [f"<b>{html.escape(t['file'])}</b>",
-            f"{html.escape(t.get('lane') or 'Unsorted')} · {html.escape(t.get('subgenre_1', ''))}",
+            f"{html.escape(t.get('lane') or 'Unsorted')} · {html.escape(t.get('substyle') or t.get('subgenre_1', ''))}",
             f"{t.get('bpm', '')} BPM · {t.get('camelot', '')} · energy {t.get('energy', '')}"]
     extra = " · ".join(x for x in (t.get("vocals", ""), t.get("mood_1", "")) if x)
     if extra:
         bits.append(html.escape(extra))
+    if t.get("structure"):
+        bits.append(html.escape(t["structure"]))
     if t.get("quality"):
         bits.append(f"quality {t['quality']} · enjoyment {t.get('enjoyment', '')}")
+    if t.get("faults"):
+        bits.append("⚠ " + html.escape(t["faults"]))
     return "<br>".join(bits)
 
 def _audio_src(t):
@@ -164,6 +168,15 @@ def overview(tracks):
     figs = []
     figs.append(_hbar(Counter(t.get("lane") or "Unsorted" for t in tracks), "Tracks per lane", n=10))
     figs.append(_hbar(Counter(t.get("subgenre_1") for t in tracks if t.get("subgenre_1")), "Top subgenres", n=15))
+    subs = Counter(f"{t.get('lane') or 'Unsorted'}: {t['substyle']}" for t in tracks if t.get("substyle"))
+    if subs:
+        figs.append(_hbar(subs, "Biggest sub-styles inside the lanes", n=15))
+    if any(t.get("dj_friendly") for t in tracks):
+        figs.append(_hbar(Counter(t["dj_friendly"] for t in tracks if t.get("dj_friendly")),
+                          "Long enough intro and outro for DJs (16+ bars)", n=4))
+        faults = Counter(f.strip().split(" ")[0] for t in tracks for f in (t.get("faults") or "").split(";") if f.strip())
+        faults["no faults found"] = sum(1 for t in tracks if not (t.get("faults") or "").strip())
+        figs.append(_hbar(faults, "Fault check", n=5))
     bpms = [b for b in (_num(t.get("bpm")) for t in tracks) if b]
     figs.append(_hist(bpms, "BPM", "BPM", bins=dict(size=2)))
     figs.append(camelot_wheel(tracks))
@@ -290,6 +303,7 @@ def write_report(folder, catalogue_name, fingerprint_name):
     tracks = release_planner.read_tracks(folder, catalogue_name, fingerprint_name)
     if not tracks:
         return ["No analysed tracks in the catalogue yet."]
+    release_planner.assign_substyles(tracks)
     lane_counts = Counter(t.get("lane") or "Unsorted" for t in tracks)
     lanes = sorted(l for l in lane_counts if l != "Unsorted") + (["Unsorted"] if "Unsorted" in lane_counts else [])
     map_fig = sound_map(tracks, lanes)

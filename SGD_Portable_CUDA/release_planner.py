@@ -33,6 +33,8 @@ import clap_tags
 LISTEN_NAME   = "sgd_listen_first.csv"
 RELEASES_NAME = "sgd_releases.csv"
 SAME_NAME     = "sgd_same_audio.csv"
+SUBSTYLES_NAME = "sgd_substyles.csv"
+SUBSTYLE_MIN  = 12          # lanes smaller than this are not split
 CHOICES_NAME  = "sgd_choices.csv"
 CHOICE_BONUS  = {"keep": 3.0, "maybe": 1.0}
 BPM_TOLERANCE = 0.05        # tracks within 5% of the release's BPM
@@ -138,6 +140,8 @@ def rank_score(row):
         score = _num(row.get("subgenre_1_pct"), 0) / 10
     if row.get("ending") == "cut off":
         score -= 1.0                  # most likely needs a re-render or an edit
+    faults = [f for f in (row.get("faults") or "").split(";") if f.strip()]
+    score -= 0.5 * len(faults)        # clipping, dropouts or shimmer
     return round(score, 2)
 
 # ---------------------------------------------------------------------------
@@ -201,8 +205,9 @@ def write_listen_first(folder, songs):
     return len(firsts)
 
 LISTEN_COLUMNS = ["order", "pick", "choice", "file", "folder", "song", "idea", "takes_of_song",
-                  "same_audio_as", "score", "lane", "artist", "subgenre_1", "bpm", "camelot", "energy",
-                  "ending", "lufs", "vocals", "mood_1", "instruments", "quality", "enjoyment"]
+                  "same_audio_as", "score", "lane", "substyle", "artist", "subgenre_1", "bpm", "camelot",
+                  "energy", "ending", "structure", "dj_friendly", "faults", "lufs", "vocals", "mood_1",
+                  "instruments", "quality", "enjoyment"]
 
 def _listen_row(order, pick, t, n_takes):
     row = {c: t.get(c, "") for c in LISTEN_COLUMNS}
@@ -291,6 +296,81 @@ def sequence(members):
         order.append(nxt)
     return order
 
+# ---------------------------------------------------------------------------
+# Sub-styles: natural groups inside each lane
+# ---------------------------------------------------------------------------
+def _top(values, n=1):
+    c = {}
+    for v in values:
+        if v:
+            c[v] = c.get(v, 0) + 1
+    return [k for k, _ in sorted(c.items(), key=lambda x: -x[1])[:n]]
+
+def _name_group(members, lane_members):
+    """Name a group by its main style plus the tag that sets it apart most
+    from the rest of the lane."""
+    name = _top([t.get("subgenre_1") for t in members]) or ["Mixed"]
+    best, lift = None, 1.3
+    for col in ("vocals", "mood_1", "instruments"):
+        for value in _top([(t.get(col) or "").split(",")[0].strip() for t in members], 3):
+            share = sum((t.get(col) or "").split(",")[0].strip() == value for t in members) / len(members)
+            base = sum((t.get(col) or "").split(",")[0].strip() == value for t in lane_members) / len(lane_members)
+            if share >= 0.35 and base and share / base > lift:
+                best, lift = value, share / base
+    bpms = sorted(t["_bpm"] for t in members if t["_bpm"])
+    bits = name + ([best] if best else []) + ([f"{bpms[len(bpms) // 2]:.0f}"] if bpms else [])
+    return " · ".join(bits)
+
+def assign_substyles(tracks):
+    """Cluster each lane by sound and give every track a 'substyle' name."""
+    by_lane = {}
+    for t in tracks:
+        t["substyle"] = ""
+        by_lane.setdefault(t.get("lane") or "Unsorted", []).append(t)
+    try:
+        from sklearn.cluster import KMeans
+    except ImportError:
+        return
+    for lane, members in by_lane.items():
+        if len(members) < SUBSTYLE_MIN:
+            continue
+        # About 3 groups for 30 tracks, 5 for 100, at most 12
+        k = int(min(12, max(2, round((len(members) / 4) ** 0.5)), len(members) // 4))
+        if k < 2:
+            continue
+        X = np.stack([t["_vec"] for t in members])
+        labels = KMeans(n_clusters=k, n_init=4, random_state=0).fit_predict(X)
+        names = {}
+        for c in range(k):
+            group = [t for t, l in zip(members, labels) if l == c]
+            name = _name_group(group, members)
+            while name in names.values():
+                name += " ·"
+            names[c] = name
+        for t, l in zip(members, labels):
+            t["substyle"] = names[l]
+
+def write_substyles(folder, tracks):
+    groups = {}
+    for t in tracks:
+        if t.get("substyle"):
+            groups.setdefault((t.get("lane") or "Unsorted", t["substyle"]), []).append(t)
+    rows = []
+    for (lane, sub), members in sorted(groups.items()):
+        bpms = sorted(t["_bpm"] for t in members if t["_bpm"])
+        rows.append({"lane": lane, "substyle": sub, "tracks": len(members),
+                     "songs": len({t.get("song") for t in members}),
+                     "subgenres": ", ".join(_top([t.get("subgenre_1") for t in members], 3)),
+                     "vocals": ", ".join(_top([t.get("vocals") for t in members], 2)),
+                     "moods": ", ".join(_top([t.get("mood_1") for t in members], 3)),
+                     "instruments": ", ".join(_top([(t.get("instruments") or "").split(",")[0].strip() for t in members], 3)),
+                     "bpm_range": f"{bpms[0]:.0f}-{bpms[-1]:.0f}" if bpms else "",
+                     "median_energy": float(np.median([t["_energy"] for t in members]))})
+    _write_csv(os.path.join(folder, SUBSTYLES_NAME),
+               ["lane", "substyle", "tracks", "songs", "subgenres", "vocals", "moods", "instruments",
+                "bpm_range", "median_energy"], rows)
+    return len(rows)
+
 def write_releases(folder, songs, size):
     by_lane = {}
     for takes in songs.values():
@@ -300,9 +380,26 @@ def write_releases(folder, songs, size):
     kind = "EP" if size <= 7 else "Album"
     rows, summary = [], []
     for lane in sorted(by_lane):
-        releases, leftover = group_releases(by_lane[lane], size)
-        for r, members in enumerate(releases, 1):
-            name = f"{lane} - {kind} {r:02d}"
+        # Build releases inside each sub-style first, so they hang together
+        # tightly, then mix what is left over within the lane
+        by_sub = {}
+        for t in by_lane[lane]:
+            by_sub.setdefault(t.get("substyle") or "", []).append(t)
+        named, leftover = [], []
+        for sub in sorted(by_sub, key=lambda k: (k == "", k)):
+            if not sub:
+                leftover.extend(by_sub[sub])
+                continue
+            releases_sub, rest = group_releases(by_sub[sub], size)
+            named += [(sub, m) for m in releases_sub]
+            leftover.extend(rest)
+        mixed, leftover = group_releases(leftover, size)
+        named += [("mixed" if by_sub.keys() - {""} else "", m) for m in mixed]
+        releases = [m for _, m in named]
+        counters = {}
+        for sub, members in named:
+            counters[sub] = counters.get(sub, 0) + 1
+            name = f"{lane} - {sub + ' - ' if sub else ''}{kind} {counters[sub]:02d}"
             ordered = sequence(members)
             bpms = [m["_bpm"] for m in ordered if m["_bpm"] is not None]
             for pos, t in enumerate(ordered, 1):
@@ -310,7 +407,8 @@ def write_releases(folder, songs, size):
                 rows.append({
                     "release": name, "position": pos, "file": t["file"], "folder": t.get("folder", ""),
                     "song": t.get("song", ""), "choice": t["_choice"], "vocals": t.get("vocals", ""),
-                    "lane": lane, "artist": t.get("artist", ""),
+                    "lane": lane, "substyle": t.get("substyle", ""), "artist": t.get("artist", ""),
+                    "dj_friendly": t.get("dj_friendly", ""), "faults": t.get("faults", ""),
                     "subgenre_1": t.get("subgenre_1", ""), "bpm": t.get("bpm", ""),
                     "camelot": t.get("camelot", ""), "energy": t.get("energy", ""), "score": t["_rank"],
                     "mixes_with_previous": "" if prev is None else ("yes" if keys_mix(prev.get("camelot"), t.get("camelot")) else "no"),
@@ -320,13 +418,15 @@ def write_releases(folder, songs, size):
         for t in leftover:
             rows.append({"release": f"{lane} - unplaced", "position": "", "file": t["file"],
                          "folder": t.get("folder", ""), "song": t.get("song", ""), "choice": t["_choice"],
-                         "vocals": t.get("vocals", ""), "lane": lane,
+                         "vocals": t.get("vocals", ""), "lane": lane, "substyle": t.get("substyle", ""),
+                         "dj_friendly": t.get("dj_friendly", ""), "faults": t.get("faults", ""),
                          "artist": t.get("artist", ""), "subgenre_1": t.get("subgenre_1", ""),
                          "bpm": t.get("bpm", ""), "camelot": t.get("camelot", ""),
                          "energy": t.get("energy", ""), "score": t["_rank"],
                          "mixes_with_previous": "", "release_bpm_range": ""})
-    cols = ["release", "position", "file", "folder", "song", "choice", "vocals", "lane", "artist",
-            "subgenre_1", "bpm", "camelot", "energy", "score", "mixes_with_previous", "release_bpm_range"]
+    cols = ["release", "position", "file", "folder", "song", "choice", "vocals", "lane", "substyle", "artist",
+            "subgenre_1", "bpm", "camelot", "energy", "score", "mixes_with_previous", "release_bpm_range",
+            "dj_friendly", "faults"]
     _write_csv(os.path.join(folder, RELEASES_NAME), cols, rows)
     return summary, kind
 
@@ -363,6 +463,8 @@ def plan(folder, size, catalogue_name, fingerprint_name):
         return [f"{catalogue_name} comes from an older SGD version. Run the batch again first."]
     same = audio_id.find_same_audio(audio_id.read_prints(folder))
     group_songs(tracks, same)
+    assign_substyles(tracks)
+    n_subs = write_substyles(folder, tracks)
     songs = best_takes(tracks)
     n_same = write_same_audio(folder, tracks, same)
     n_songs = write_listen_first(folder, songs)
@@ -371,6 +473,8 @@ def plan(folder, size, catalogue_name, fingerprint_name):
     lines = [f"{len(tracks)} track(s), {len(songs)} song(s)"
              + (f", {binned} binned" if binned else "") + ".",
              f"Wrote {LISTEN_NAME}: the best take of each song first, best at the top."]
+    if n_subs:
+        lines.append(f"Found {n_subs} sub-style(s) inside the lanes. See {SUBSTYLES_NAME}.")
     if os.path.exists(os.path.join(folder, audio_id.PRINT_NAME)):
         lines.append(f"{n_same} pair(s) of tracks share audio. See {SAME_NAME}.")
     if not any(t.get("quality") for t in tracks):

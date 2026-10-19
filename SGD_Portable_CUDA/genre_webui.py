@@ -33,6 +33,7 @@ sys.stdout = _SuppressHF(sys.stdout)
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "0"
 import tagcloud
 import track_facts
+import track_detail
 import quality
 import clap_tags
 import audio_id
@@ -923,6 +924,7 @@ CATALOGUE_COLUMNS = (
     + [c for i in range(1, 4) for c in (f"genre_{i}", f"genre_{i}_pct")]
     + [c for i in range(1, 6) for c in (f"subgenre_{i}", f"subgenre_{i}_pct")]
     + ["bpm", "key", "camelot", "length", "lufs", "true_peak_db", "energy", "ending"]
+    + track_detail.COLUMNS
     + ["quality", "enjoyment", "complexity", "usefulness"]
     + clap_tags.COLUMNS
     + ["tags", "status", "error", "model", "analysed_at"]
@@ -1073,6 +1075,11 @@ def analyse_track(path, root, score_quality=True, tag_clap=True):
         row.update(track_facts.track_facts(y, SR, path, style_scores))
         row["lufs"], row["true_peak_db"] = track_facts.lufs_and_peak(native, native_sr)
         row["lane"], row["artist"] = track_facts.pick_lane(style_scores, row["bpm"] or None)
+        try:
+            row.update(track_detail.detail(y, SR, native, native_sr, row["bpm"] or None,
+                                           row["lufs"], row["true_peak_db"]))
+        except Exception as e:
+            print(f"Structure and sound detail failed for this track: {str(e)[:200]}")
         if score_quality:
             row.update(quality.score(y))
         clap_vec = None
@@ -1333,6 +1340,12 @@ def listen_show(folder, rows, idx, note=""):
              " · ".join(x for x in (r.get("vocals", ""), r.get("mood_1", ""), r.get("instruments", "")) if x),
              f"Quality {r.get('quality', '')} · enjoyment {r.get('enjoyment', '')} · score {r.get('score', '')}"
              f" · ending {r.get('ending', '')}"]
+    if r.get("structure"):
+        facts.append(f"Structure (bars): {r['structure']} · DJ intro/outro: {r.get('dj_friendly', '')}")
+    if r.get("substyle"):
+        facts.append(f"Sub-style: {r['substyle']}")
+    if r.get("faults"):
+        facts.append(f"⚠ Check: {r['faults']}")
     if r.get("same_audio_as"):
         facts.append(f"Same audio as: {r['same_audio_as']}")
     if r.get("choice"):

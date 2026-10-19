@@ -109,6 +109,9 @@ Results go into `sgd_catalogue.csv` in the chosen folder. Each track gets a row 
 - **bpm**, **key**, **camelot** (the key on the Camelot wheel used for harmonic mixing), **length** and **energy** (1-10)
 - **lufs** and **true_peak_db**: loudness the way streaming services measure it, and the true peak. Most services turn tracks down to about -14 LUFS
 - **ending**: clean, fade, cut off or long silence. A rough check to spot tracks that stop dead
+- **structure** (e.g. `intro 16 · drop 32 · break 16 · drop 32 · outro 16`, in bars), **intro_bars**, **outro_bars**, **first_drop**, **drops**, **breakdowns** and **dj_friendly** (yes when intro and outro are both 16 bars or more)
+- **brightness_hz**, **bass_pct** (share of energy below 150 Hz), **stereo_width_pct** (0 is mono), **plr_db** (peak to loudness: under about 8 is squashed) and **tempo_drift_pct** (how far the tempo wanders)
+- **faults**: clipping, dropouts and metallic high-end shimmer, with the time each starts. Each fault takes half a point off the ranking
 - **quality**, **enjoyment**, **complexity** and **usefulness** (about 1-10) from Meta's [Audiobox Aesthetics](https://huggingface.co/facebook/audiobox-aesthetics) model (CC BY 4.0). Untick **Score quality (slower)** to skip them
 - **vocals** (instrumental, female vocal, male vocal or rap, with %), **mood_1**, **mood_2** and **instruments** from LAION's [CLAP music model](https://huggingface.co/laion/larger_clap_music). Change or add tags in `clap_tags.csv`. Untick **Tag vocals, mood and instruments (slower)** to skip them
 - tags, status, error, model and time of analysis
@@ -128,7 +131,9 @@ After a batch, set **Tracks per release** and click **📀 Plan releases**. SGD 
 - `sgd_releases.csv`: suggested EPs (up to 7 tracks) or albums, one lane at a time. Each release uses the best take of each song, never two takes of one song, and leaves out binned tracks. Its tracks sound alike, sit within about 5% of the same BPM and mix well by key. They are ordered to build to a peak about two thirds in and ease off at the end
 - `sgd_same_audio.csv`: pairs of tracks that share the same audio, such as the same render saved twice or an extend of another take
 
-All three are suggestions to edit in Excel. Plan again whenever the catalogue grows or after a listening session.
+Each lane with 12 or more tracks is also split into sub-styles: groups that sound alike, named by their main style, the tag that sets them apart and their BPM. Releases are built inside a sub-style first, then from what is left in the lane. `sgd_substyles.csv` lists every sub-style with its tracks, vocals, moods and instruments.
+
+All of these are suggestions to edit in Excel. Plan again whenever the catalogue grows or after a listening session.
 
 ### Listen
 Click **🎧 Load listen list** to play the listen-first list in order. Rate each track with **Keep**, **Maybe** or **Bin**, or press K, M or B on the keyboard. S skips. Each choice saves straight away to `sgd_choices.csv` and the next track starts. The **Play** box picks the best takes you have not rated yet, every take you have not rated yet, or everything. Click **Plan releases** afterwards so the files use your choices.
